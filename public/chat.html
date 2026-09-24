@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Front Desk Concierge</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="demo-banner-slot"></div>
+<div id="app">
+  <button id="menu-btn" aria-label="Open topics menu">☰</button>
+  <div id="scrim" hidden></div>
+
+  <nav id="rail">
+    <div class="brand">
+      <div class="mark">Y</div>
+      <h1>Front Desk Concierge</h1>
+      <p>YMCA of Southern Arizona</p>
+    </div>
+    <div id="rail-foot">
+      <div class="kb-status" id="kb-status"><span class="dot"></span><span>Ask about hours, pricing, policies, or programs</span></div>
+      <a id="staff-directory-btn" href="https://docs.google.com/spreadsheets/d/1ep60UGGmxN5e9I5QG86-6VkUhA1GZB0NNzNkwlPzKpM/edit?usp=sharing" target="_blank" rel="noopener">👥 Staff Directory</a>
+      <a id="admin-link" href="/admin">⚙ Manage answers</a>
+      <button id="logout-btn" type="button">Log out</button>
+    </div>
+  </nav>
+
+  <main id="main">
+    <div id="thread">
+      <div id="intro">
+        <div class="mark-lg">Y</div>
+        <h2>Ask the front desk assistant</h2>
+        <p>Type a question a member might ask — answers come only from the saved knowledge base.</p>
+      </div>
+    </div>
+    <div id="composer-wrap">
+      <form id="composer">
+        <textarea id="q" rows="1" placeholder="Type a question…"></textarea>
+        <button id="send" type="submit">Send</button>
+      </form>
+    </div>
+  </main>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

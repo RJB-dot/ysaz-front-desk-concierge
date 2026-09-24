@@ -1,0 +1,29 @@
+# Edit `app` below to a name that's unique across all of Fly.io before deploying
+# (e.g. "ysaz-front-desk-concierge"). See README.md for the full deploy walkthrough.
+app = "CHANGE-ME-front-desk-concierge"
+primary_region = "phx"  # Phoenix — closest Fly.io region to Tucson. Change if you prefer another.
+
+[build]
+
+[env]
+  PORT = "8080"
+  DATA_DIR = "/data"
+
+[[mounts]]
+  source = "fdc_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  # Important: keep this at 1. The knowledge base is stored as a JSON file on the
+  # attached volume, not a shared database — running more than one machine would let
+  # them drift out of sync with each other.
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1

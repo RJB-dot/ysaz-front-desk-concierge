@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Front Desk Concierge</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="gate-wrap">
+    <div class="gate-card">
+      <div class="gate-mark">Y</div>
+      <h1>Front Desk Concierge</h1>
+      <p>YMCA of Southern Arizona — enter the staff passcode to continue.</p>
+      <form id="form">
+        <input id="passcode" type="password" inputmode="text" placeholder="Passcode" autocomplete="off" autofocus>
+        <button id="submit" type="submit">Continue</button>
+      </form>
+      <div class="gate-error" id="error"></div>
+    </div>
+  </div>
+  <script>
+    var form = document.getElementById('form');
+    var input = document.getElementById('passcode');
+    var btn = document.getElementById('submit');
+    var err = document.getElementById('error');
+    form.addEventListener('submit', function(ev){
+      ev.preventDefault();
+      var passcode = input.value;
+      if(!passcode) return;
+      btn.disabled = true; err.textContent = '';
+      fetch('/api/staff-login', {
+        method: 'POST', headers: {'content-type':'application/json'},
+        body: JSON.stringify({ passcode: passcode })
+      }).then(function(r){
+        if(r.ok){ window.location.href = '/'; return; }
+        if(r.status === 429){ err.textContent = 'Too many attempts — try again later.'; }
+        else { err.textContent = "That passcode didn't work."; }
+        btn.disabled = false; input.value=''; input.focus();
+      }).catch(function(){
+        err.textContent = 'Something went wrong — try again.';
+        btn.disabled = false;
+      });
+    });
+  </script>
+</body>
+</html>

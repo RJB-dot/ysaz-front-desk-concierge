@@ -1,0 +1,14 @@
+{
+  "name": "front-desk-concierge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "YMCA of Southern Arizona Front Desk Concierge — staff chat + admin knowledge base",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {}
+}

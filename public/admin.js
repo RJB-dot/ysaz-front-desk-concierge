@@ -1,0 +1,163 @@
+(function(){
+  var els = {
+    form: document.getElementById('kb-form'),
+    title: document.getElementById('f-title'),
+    content: document.getElementById('f-content'),
+    file: document.getElementById('f-file'),
+    fileCurrent: document.getElementById('file-current'),
+    save: document.getElementById('f-save'),
+    cancel: document.getElementById('f-cancel'),
+    status: document.getElementById('f-status'),
+    formTitle: document.getElementById('form-title'),
+    list: document.getElementById('kb-list'),
+    count: document.getElementById('kb-count'),
+    logout: document.getElementById('logout-link'),
+  };
+  var editingId = null;
+  var editingEntry = null;
+  var removeAttachmentFlag = false;
+
+  function escapeHtml(s){
+    return String(s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
+  var LINK_RE = /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})|(https?:\/\/[^\s<>"']+)|(www\.[^\s<>"']+)|((?<![\w@.\/])(?:[a-z0-9][a-z0-9-]*\.)+(?:com|org|net|edu|gov|io)(?:\/[^\s<>"']*)?)/gi;
+  function linkify(s){
+    return escapeHtml(s).replace(LINK_RE, function(m){
+      var trail = '';
+      while(m && /[.,;:!?)\]}]$/.test(m)){ trail = m.slice(-1) + trail; m = m.slice(0, -1); }
+      if(!m) return trail;
+      var href;
+      if(/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(m)) href = 'mailto:' + m;
+      else if(/^https?:\/\//i.test(m)) href = m;
+      else href = 'https://' + m;
+      return '<a href="'+href+'" target="_blank" rel="noopener">'+m+'</a>' + trail;
+    });
+  }
+
+  els.logout.addEventListener('click', function(ev){
+    ev.preventDefault();
+    fetch('/api/logout', { method: 'POST' }).then(function(){ window.location.href = '/'; });
+  });
+
+  function renderFileCurrent(){
+    if(editingEntry && editingEntry.attachment && !removeAttachmentFlag){
+      els.fileCurrent.innerHTML =
+        '📎 <span>'+escapeHtml(editingEntry.attachment.filename || 'Attached flyer')+'</span> ' +
+        '<button type="button" class="btn danger" id="remove-attachment" style="margin-left:8px;">Remove</button>';
+      var btn = document.getElementById('remove-attachment');
+      btn.addEventListener('click', function(){ removeAttachmentFlag = true; renderFileCurrent(); });
+    } else {
+      els.fileCurrent.innerHTML = '';
+    }
+  }
+
+  function resetForm(){
+    editingId = null; editingEntry = null; removeAttachmentFlag = false;
+    els.title.value = ''; els.content.value = ''; els.file.value = '';
+    els.formTitle.textContent = 'Add a new answer';
+    els.cancel.hidden = true;
+    els.status.textContent = ''; els.status.className = 'status-msg';
+    renderFileCurrent();
+  }
+  els.cancel.addEventListener('click', resetForm);
+
+  function startEdit(entry){
+    editingId = entry.id; editingEntry = entry; removeAttachmentFlag = false;
+    els.title.value = entry.title; els.content.value = entry.content; els.file.value = '';
+    els.formTitle.textContent = 'Edit answer';
+    els.cancel.hidden = false;
+    els.status.textContent = ''; els.status.className = 'status-msg';
+    renderFileCurrent();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function setStatus(msg, ok){
+    els.status.textContent = msg;
+    els.status.className = 'status-msg ' + (ok ? 'ok' : 'err');
+  }
+
+  function loadList(){
+    fetch('/api/admin/kb').then(function(r){ return r.json(); }).then(renderList).catch(function(){
+      els.list.innerHTML = '<div class="empty">Couldn\'t load saved answers.</div>';
+    });
+  }
+
+  function renderList(entries){
+    els.count.textContent = entries.length;
+    if(!entries.length){
+      els.list.innerHTML = '<div class="empty">Nothing saved yet. Add the first answer on the left.</div>';
+      return;
+    }
+    els.list.innerHTML = '';
+    entries.forEach(function(e){
+      var item = document.createElement('div');
+      item.className = 'kb-item';
+      var flyerHtml = '';
+      if(e.attachment){
+        flyerHtml = '<div class="file-row">📎 '+escapeHtml(e.attachment.filename || 'Flyer')+
+          ' — <a href="/uploads/'+e.attachment.path+'" target="_blank" rel="noopener">view</a></div>';
+      }
+      item.innerHTML =
+        '<div class="row"><div class="ttl">'+escapeHtml(e.title)+'</div>' +
+        '<div class="kb-actions"><button data-act="edit">Edit</button><button data-act="del">Delete</button></div></div>' +
+        '<div class="body">'+linkify(e.content)+'</div>' + flyerHtml;
+      item.querySelector('[data-act="edit"]').addEventListener('click', function(){ startEdit(e); });
+      item.querySelector('[data-act="del"]').addEventListener('click', function(){
+        if(!confirm('Delete "'+e.title+'"? This can\'t be undone.')) return;
+        fetch('/api/admin/kb/'+e.id, { method:'DELETE' }).then(function(){
+          if(editingId === e.id) resetForm();
+          loadList();
+        });
+      });
+      els.list.appendChild(item);
+    });
+  }
+
+  els.form.addEventListener('submit', function(ev){
+    ev.preventDefault();
+    var title = els.title.value.trim();
+    var content = els.content.value.trim();
+    if(!title || !content){ setStatus('Title and answer are both required.', false); return; }
+    els.save.disabled = true; setStatus('Saving…', true);
+
+    var method = editingId ? 'PUT' : 'POST';
+    var url = editingId ? '/api/admin/kb/'+editingId : '/api/admin/kb';
+
+    fetch(url, {
+      method: method, headers: {'content-type':'application/json'},
+      body: JSON.stringify({ title: title, content: content })
+    }).then(function(r){ return r.json(); }).then(function(entry){
+      var afterSave = function(){
+        setStatus('Saved.', true);
+        loadList();
+        resetForm();
+      };
+      var file = els.file.files[0];
+      if(file){
+        var fd = new FormData(); fd.append('file', file);
+        fetch('/api/admin/kb/'+entry.id+'/attachment', { method:'POST', body: fd })
+          .then(afterSave).catch(function(){ setStatus('Saved, but the flyer upload failed.', false); loadList(); resetForm(); });
+      } else if(removeAttachmentFlag && entry.id){
+        fetch('/api/admin/kb/'+entry.id+'/attachment', { method:'DELETE' }).then(afterSave);
+      } else {
+        afterSave();
+      }
+    }).catch(function(){
+      setStatus('Something went wrong saving that.', false);
+    }).finally(function(){ els.save.disabled = false; });
+  });
+
+  fetch('/api/health').then(function(r){ return r.json(); }).then(function(d){
+    if(d && d.demoMode){
+      var slot = document.getElementById('demo-banner-slot');
+      var b = document.createElement('div');
+      b.className = 'demo-banner';
+      b.textContent = 'Demo mode — no Anthropic API key configured yet. The knowledge base editor below works normally either way.';
+      slot.appendChild(b);
+    }
+  }).catch(function(){});
+
+  loadList();
+})();

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manage Answers — Front Desk Concierge</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="demo-banner-slot"></div>
+<div class="admin-wrap">
+  <div class="admin-head">
+    <h1>⚙ Manage Answers</h1>
+    <div>
+      <a href="/">← Back to chat</a>
+      &nbsp;·&nbsp;
+      <a href="#" id="logout-link">Log out</a>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div class="panel">
+      <h2 id="form-title">Add a new answer</h2>
+      <form id="kb-form">
+        <label for="f-title">Title</label>
+        <input id="f-title" type="text" placeholder="e.g. Guest Passes & Day Passes">
+        <label for="f-content">Answer</label>
+        <textarea id="f-content" placeholder="Write the answer in your own words…"></textarea>
+        <div class="file-row" id="file-current"></div>
+        <label for="f-file" style="margin-top:14px;">Attach a flyer (optional — PDF or image)</label>
+        <input id="f-file" type="file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp">
+        <div class="form-actions">
+          <button class="btn primary" id="f-save" type="submit">Save</button>
+          <button class="btn" id="f-cancel" type="button" hidden>Cancel edit</button>
+        </div>
+        <div class="status-msg" id="f-status"></div>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Saved answers (<span id="kb-count">0</span>)</h2>
+      <div id="kb-list"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/admin.js"></script>
+</body>
+</html>

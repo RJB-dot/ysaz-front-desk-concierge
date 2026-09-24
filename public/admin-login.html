@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Front Desk Concierge — Admin</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="gate-wrap">
+    <div class="gate-card">
+      <div class="gate-mark">⚙</div>
+      <h1>Manage Answers</h1>
+      <p>Enter the admin password to add or edit knowledge base entries.</p>
+      <form id="form">
+        <input id="password" type="password" placeholder="Admin password" autocomplete="off" autofocus>
+        <button id="submit" type="submit">Continue</button>
+      </form>
+      <div class="gate-error" id="error"></div>
+      <p style="margin-top:18px;"><a href="/">← Back to chat</a></p>
+    </div>
+  </div>
+  <script>
+    var form = document.getElementById('form');
+    var input = document.getElementById('password');
+    var btn = document.getElementById('submit');
+    var err = document.getElementById('error');
+    form.addEventListener('submit', function(ev){
+      ev.preventDefault();
+      var password = input.value;
+      if(!password) return;
+      btn.disabled = true; err.textContent = '';
+      fetch('/api/admin-login', {
+        method: 'POST', headers: {'content-type':'application/json'},
+        body: JSON.stringify({ password: password })
+      }).then(function(r){
+        if(r.ok){ window.location.href = '/admin'; return; }
+        if(r.status === 429){ err.textContent = 'Too many attempts — try again later.'; }
+        else { err.textContent = "That password didn't work."; }
+        btn.disabled = false; input.value=''; input.focus();
+      }).catch(function(){
+        err.textContent = 'Something went wrong — try again.';
+        btn.disabled = false;
+      });
+    });
+  </script>
+</body>
+</html>
