@@ -190,7 +190,8 @@
     entries.forEach(function(q){
       var item = document.createElement('div');
       item.className = 'kb-item q-item' + (q.handled ? ' handled' : '');
-      var meta = escapeHtml(q.name) + (q.branch ? ' · ' + escapeHtml(q.branch) : '') + ' · ' + fmtDate(q.createdAt) +
+      var meta = (q.topic ? '<span class="q-topic">' + escapeHtml(q.topic) + '</span> · ' : '') +
+        escapeHtml(q.name) + ' · ' + fmtDate(q.createdAt) +
         (q.emailed ? ' · emailed to Support' : ' · <span class="q-warn">not emailed</span>');
       item.innerHTML =
         '<div class="row"><div class="ttl">'+escapeHtml(q.question)+'</div>' +
@@ -198,8 +199,7 @@
           (q.handled ? '' : '<button data-act="answer">Add as answer</button>') +
           '<button data-act="toggle">'+(q.handled ? 'Reopen' : 'Mark handled')+'</button>' +
         '</div></div>' +
-        '<div class="q-meta">'+meta+'</div>' +
-        (q.details ? '<div class="body">'+linkify(q.details)+'</div>' : '');
+        '<div class="q-meta">'+meta+'</div>';
       var answerBtn = item.querySelector('[data-act="answer"]');
       answerBtn && answerBtn.addEventListener('click', function(){
         resetForm();

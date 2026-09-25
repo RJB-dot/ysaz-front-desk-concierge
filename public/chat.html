@@ -47,14 +47,26 @@
   <form id="support-form">
     <h2>Send a question to Support</h2>
     <p class="dlg-sub">Couldn't find the answer? Support will follow up, and the answer can be added here for next time.</p>
-    <label for="s-question">Question</label>
-    <textarea id="s-question" rows="3" required></textarea>
     <label for="s-name">Your name</label>
     <input id="s-name" type="text" autocomplete="name" required>
-    <label for="s-branch">Branch (optional)</label>
-    <input id="s-branch" type="text" placeholder="e.g. Lohse YMCA">
-    <label for="s-details">Anything else Support should know? (optional)</label>
-    <textarea id="s-details" rows="2" placeholder="e.g. member's name and phone number so Support can call them back"></textarea>
+    <label for="s-topic">Topic</label>
+    <select id="s-topic" required>
+      <option value="">Choose a topic…</option>
+      <option>Aquatics</option>
+      <option>Donations</option>
+      <option>Membership</option>
+      <option>Programs</option>
+      <option>Sports</option>
+      <option>Standard Operating Procedures</option>
+      <option>Youth Development</option>
+      <option value="Other">Other</option>
+    </select>
+    <div id="s-other-wrap" hidden>
+      <label for="s-other">What's the topic?</label>
+      <input id="s-other" type="text" placeholder="Type the topic">
+    </div>
+    <label for="s-question">What is the question?</label>
+    <textarea id="s-question" rows="4" required></textarea>
     <div class="dlg-status" id="s-status"></div>
     <div class="dlg-actions">
       <button type="button" class="dlg-btn" id="s-cancel">Cancel</button>

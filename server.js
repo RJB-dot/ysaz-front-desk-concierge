@@ -373,10 +373,10 @@ route('POST', '/api/questions', async (req, res, params, ip) => {
   const clip = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
   const question = clip(body && body.question, 2000);
   const name = clip(body && body.name, 100);
-  if (!question || !name) return sendJson(res, 400, { error: 'missing_fields' });
+  if (!question || !name || !clip(body.topic, 120)) return sendJson(res, 400, { error: 'missing_fields' });
   const entry = {
     id: newId(), question, name,
-    branch: clip(body.branch, 100), details: clip(body.details, 4000),
+    topic: clip(body.topic, 120),
     createdAt: Date.now(), handled: false, emailed: false,
   };
 
@@ -384,10 +384,10 @@ route('POST', '/api/questions', async (req, res, params, ip) => {
     const row = (label, val) => val ? `<p><strong>${label}:</strong><br>${escapeHtml(val).replace(/\n/g, '<br>')}</p>` : '';
     const html =
       "<p>A front desk staff member asked a question the Front Desk Concierge couldn't answer.</p>" +
-      row('Question', entry.question) + row('From', entry.name) + row('Branch', entry.branch) + row('Details', entry.details) +
+      row('Topic', entry.topic) + row('Question', entry.question) + row('From', entry.name) +
       '<p style="color:#666;font-size:12px">Once it&#39;s answered, add it to the knowledge base at /admin so the concierge can answer it next time.</p>';
     try {
-      await sendEmailViaResend(SUPPORT_EMAIL, 'Front desk question: ' + entry.question.slice(0, 80), html);
+      await sendEmailViaResend(SUPPORT_EMAIL, 'Front desk question (' + entry.topic + '): ' + entry.question.slice(0, 80), html);
       entry.emailed = true;
     } catch { /* still saved below — shows as "not emailed" in /admin */ }
   }

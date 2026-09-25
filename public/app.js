@@ -14,8 +14,9 @@
     sForm: document.getElementById('support-form'),
     sQuestion: document.getElementById('s-question'),
     sName: document.getElementById('s-name'),
-    sBranch: document.getElementById('s-branch'),
-    sDetails: document.getElementById('s-details'),
+    sTopic: document.getElementById('s-topic'),
+    sOtherWrap: document.getElementById('s-other-wrap'),
+    sOther: document.getElementById('s-other'),
     sStatus: document.getElementById('s-status'),
     sSend: document.getElementById('s-send'),
     sCancel: document.getElementById('s-cancel'),
@@ -90,21 +91,27 @@
   }
 
   // ---------- "Ask Support": send a question the concierge couldn't answer ----------
-  // Name + branch are remembered on this computer so staff don't retype them every time.
+  // Name is remembered on this computer so staff don't retype it every time.
   function remembered(key){ try { return localStorage.getItem(key) || ''; } catch(e){ return ''; } }
   function remember(key, val){ try { localStorage.setItem(key, val); } catch(e){} }
 
   function openSupport(question){
     els.sQuestion.value = question || '';
     els.sName.value = remembered('fdc_name');
-    els.sBranch.value = remembered('fdc_branch');
-    els.sDetails.value = '';
+    els.sTopic.value = ''; els.sOther.value = ''; showOther();
     els.sStatus.textContent = ''; els.sStatus.className = 'dlg-status';
     els.sSend.disabled = false;
     els.rail.classList.remove('open'); els.scrim.hidden = true;
     els.dlg.showModal();
-    (question ? (els.sName.value ? els.sDetails : els.sName) : els.sQuestion).focus();
+    (els.sName.value ? els.sTopic : els.sName).focus();
   }
+  function showOther(){
+    var isOther = els.sTopic.value === 'Other';
+    els.sOtherWrap.hidden = !isOther;
+    els.sOther.required = isOther;
+    return isOther;
+  }
+  els.sTopic.addEventListener('change', function(){ if(showOther()) els.sOther.focus(); });
   els.askSupportBtn.addEventListener('click', function(){ openSupport(''); });
   els.sCancel.addEventListener('click', function(){ els.dlg.close(); });
 
@@ -112,10 +119,12 @@
     ev.preventDefault();
     var payload = {
       question: els.sQuestion.value.trim(), name: els.sName.value.trim(),
-      branch: els.sBranch.value.trim(), details: els.sDetails.value.trim()
+      topic: els.sTopic.value === 'Other' ? 'Other: ' + els.sOther.value.trim() : els.sTopic.value
     };
-    if(!payload.question || !payload.name){ els.sStatus.textContent = 'Question and your name are both required.'; els.sStatus.className = 'dlg-status err'; return; }
-    remember('fdc_name', payload.name); remember('fdc_branch', payload.branch);
+    if(!payload.question || !payload.name || !els.sTopic.value || (els.sTopic.value === 'Other' && !els.sOther.value.trim())){
+      els.sStatus.textContent = 'Please fill in your name, the topic, and the question.'; els.sStatus.className = 'dlg-status err'; return;
+    }
+    remember('fdc_name', payload.name);
     els.sSend.disabled = true;
     els.sStatus.textContent = 'Sending…'; els.sStatus.className = 'dlg-status';
     fetch('/api/questions', {
