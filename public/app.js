@@ -41,6 +41,19 @@
       return '<a href="'+href+'" target="_blank" rel="noopener">'+m+'</a>' + trail;
     });
   }
+  // Answers use a little markdown: [Register](https://…) links and **bold**. Markdown links are
+  // pulled out first (so linkify doesn't also wrap their URLs), then put back as real links.
+  var MD_LINK_RE = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  function renderAnswer(s){
+    var links = [];
+    var text = String(s).replace(MD_LINK_RE, function(_, label, url){
+      links.push('<a href="'+escapeHtml(url)+'" target="_blank" rel="noopener">'+escapeHtml(label)+'</a>');
+      return '\u0000' + (links.length - 1) + '\u0000';
+    });
+    return linkify(text)
+      .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\u0000(\d+)\u0000/g, function(_, i){ return links[+i]; });
+  }
 
   function autoGrow(){
     els.q.style.height = 'auto';
@@ -177,7 +190,7 @@
         return;
       }
       bubble.classList.remove('pending');
-      bubble.innerHTML = linkify(res.data.answer || '');
+      bubble.innerHTML = renderAnswer(res.data.answer || '');
       if(res.data.flyers && res.data.flyers.length && bubble.parentElement){
         appendFlyerChips(bubble.parentElement, res.data.flyers);
       }
