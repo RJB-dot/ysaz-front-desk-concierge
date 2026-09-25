@@ -655,18 +655,26 @@ const ANNOUNCEMENT_SCHEMA = {
   required: ['announcements'],
   additionalProperties: false,
 };
-async function extractAnnouncements(email) {
+// PDFs and images from the email, passed to Claude so details that are only on a flyer get picked up.
+const EMAIL_ATTACHMENT_TYPES = ['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+function attachmentBlocks(attachments) {
+  return attachments.filter((a) => a.contentType === 'application/pdf' || a.bytes <= 5 * 1024 * 1024).map((a) =>
+    a.contentType === 'application/pdf'
+      ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.data } }
+      : { type: 'image', source: { type: 'base64', media_type: a.contentType, data: a.data } });
+}
+async function extractAnnouncements(email, attachments = []) {
   const instructions =
     `Today is ${arizonaToday()}. You read emails sent or forwarded to the YMCA of Southern Arizona Front Desk Concierge and pull out information front desk staff should know when members ask: special events, facility or amenity closures, schedule or hours changes, new or changed programs, policy updates. ` +
     'Use the email date to resolve relative dates ("this Saturday"). Ignore signatures, disclaimers, and forwarding headers. Branch names: Lighthouse City, Lohse Family, Ott Family, Northwest (Pima County Community Center), Jacobs City, Mulcahy City, Holsclaw, Triangle Y Camp. ' +
-    'Only include facts stated in the email. Return an empty list if the email has nothing staff would need to tell members (e.g. a thank-you note or an internal-only reply).';
+    'Only include facts stated in the email or its attached flyers/images (read them — flyers often have the date, time, cost and sign-up details). Return an empty list if the email has nothing staff would need to tell members (e.g. a thank-you note or an internal-only reply).';
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
       model: ANTHROPIC_MODEL, max_tokens: 4096, system: instructions,
       output_config: { format: { type: 'json_schema', schema: ANNOUNCEMENT_SCHEMA } },
-      messages: [{ role: 'user', content: `From: ${email.from}\nDate: ${email.date}\nSubject: ${email.subject}\n\n${email.body}` }],
+      messages: [{ role: 'user', content: [...attachmentBlocks(attachments), { type: 'text', text: `From: ${email.from}\nDate: ${email.date}\nSubject: ${email.subject}\n\n${email.body}` }] }],
     }),
     signal: AbortSignal.timeout(120000),
   });
@@ -674,6 +682,21 @@ async function extractAnnouncements(email) {
   const data = await r.json();
   if (data.stop_reason === 'refusal' || data.stop_reason === 'max_tokens') throw new Error('extraction stopped: ' + data.stop_reason);
   return JSON.parse((data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')).announcements || [];
+}
+// Announcement flyers to show under an answer: ones whose title the answer (or question) mentions.
+function relatedAnnouncementFlyers(question, answer) {
+  const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const q = norm(question), ans = norm(answer);
+  const out = [];
+  for (const a of loadAnnouncements().entries) {
+    if (a.status !== 'live' || !announcementActive(a) || !(a.attachments || []).length) continue;
+    const title = norm(a.title);
+    const words = title.split(' ').filter((w) => w.length > 3);
+    const inQuestion = words.length && words.filter((w) => q.includes(w)).length >= Math.ceil(words.length / 2);
+    if (!(ans.includes(title) || inQuestion)) continue;
+    for (const f of a.attachments) out.push({ id: a.id, title: a.title, filename: f.filename, url: '/uploads/' + f.path });
+  }
+  return out;
 }
 function arizonaISODate(ms) {
   return new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/Phoenix' }); // YYYY-MM-DD
@@ -691,7 +714,8 @@ function announcementsText() {
   return live.map((a) => {
     const when = a.starts ? (a.ends && a.ends !== a.starts ? `${a.starts} to ${a.ends}` : a.starts) : 'no specific date';
     const received = new Date(a.receivedAt).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric' });
-    return `### ${a.title} (${a.category}; ${a.branches.length ? a.branches.join(', ') : 'all/unspecified branches'}; ${when}) — from an email received ${received}\n${a.details}`;
+    const flyer = a.attachments && a.attachments.length ? ' (flyer attached)' : '';
+    return `### ${a.title}${flyer} (${a.category}; ${a.branches.length ? a.branches.join(', ') : 'all/unspecified branches'}; ${when}) — from an email received ${received}\n${a.details}`;
   }).join('\n\n');
 }
 function gmailScript() {
@@ -719,6 +743,11 @@ function sendNewEmails() {
         payload: JSON.stringify({
           messageId: msg.getId(), from: msg.getFrom(), subject: msg.getSubject(),
           date: msg.getDate().toISOString(), body: msg.getPlainBody().slice(0, 100000),
+          // Flyers: PDFs and images (skipping small ones like signature logos), up to 5 per email.
+          attachments: msg.getAttachments({ includeInlineImages: true })
+            .filter((a) => /^(application\\/pdf|image\\/(png|jpeg|gif|webp))$/.test(a.getContentType()) && a.getSize() > 20000 && a.getSize() < 15000000)
+            .slice(0, 5)
+            .map((a) => ({ filename: a.getName(), contentType: a.getContentType(), data: Utilities.base64Encode(a.getBytes()) })),
         }),
         muteHttpExceptions: true,
       });
@@ -954,6 +983,8 @@ route('POST', '/api/chat', async (req, res) => {
 
   try {
     const answer = await callAnthropic(instructions, messages);
+    const seen = new Set(flyers.map((f) => f.url));
+    for (const f of relatedAnnouncementFlyers(body.question, answer)) if (!seen.has(f.url)) { seen.add(f.url); flyers.push(f); }
     sendJson(res, 200, { answer, flyers });
   } catch {
     sendJson(res, 502, { error: 'upstream_error' });
@@ -1030,34 +1061,62 @@ route('POST', '/api/admin/web-pages/check', async (req, res) => {
   sendJson(res, 200, { ok: true, started: true });
 });
 
+function saveEmailAttachments(attachments) {
+  return attachments.map((a) => {
+    const storedName = `${newId()}-${a.filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    fs.writeFileSync(path.join(UPLOADS_DIR, storedName), Buffer.from(a.data, 'base64'));
+    return { filename: a.filename, path: storedName, contentType: a.contentType };
+  });
+}
 // Called by the Gmail Apps Script (see gmailScript()) for each new email in the concierge mailbox.
 route('POST', '/api/inbound-email', async (req, res) => {
   const given = String(req.headers['x-concierge-secret'] || '');
   const ok = given.length === INBOUND_SECRET.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(INBOUND_SECRET));
   if (!ok) return sendJson(res, 401, { error: 'bad_secret' });
-  const body = await readJsonBody(req, 400000).catch(() => null);
+  const body = await readJsonBody(req, 80 * 1024 * 1024).catch(() => null);
   if (!body || !body.messageId || typeof body.body !== 'string') return sendJson(res, 400, { error: 'missing_fields' });
+  const attachments = (Array.isArray(body.attachments) ? body.attachments : []).slice(0, 5)
+    .filter((a) => a && EMAIL_ATTACHMENT_TYPES.includes(a.contentType) && typeof a.data === 'string')
+    .map((a) => ({ filename: String(a.filename || 'flyer').slice(0, 150), contentType: a.contentType, data: a.data, bytes: Math.floor(a.data.length * 3 / 4) }))
+    .filter((a) => a.bytes <= 15 * 1024 * 1024);
   const store = loadAnnouncements();
-  if (store.emailIds.includes(body.messageId)) return sendJson(res, 200, { ok: true, duplicate: true });
+  if (store.emailIds.includes(body.messageId)) {
+    // Seen before — but if it now comes with flyers (e.g. re-sent after the script learned to send them),
+    // add them to this email's announcements that don't have any yet.
+    const bare = store.entries.filter((e) => e.emailId === body.messageId && !(e.attachments || []).length);
+    if (attachments.length && bare.length) {
+      const saved = saveEmailAttachments(attachments);
+      bare.forEach((e) => { e.attachments = saved; });
+      saveAnnouncements(store);
+      console.log(`Added ${saved.length} flyer(s) to ${bare.length} announcement(s) from "${body.subject}"`);
+      return sendJson(res, 200, { ok: true, attachmentsAdded: saved.length });
+    }
+    return sendJson(res, 200, { ok: true, duplicate: true });
+  }
   if (DEMO_MODE) return sendJson(res, 503, { error: 'demo_mode' });
   const email = { from: String(body.from || ''), subject: String(body.subject || ''), date: String(body.date || ''), body: body.body.slice(0, 100000) };
   let found;
-  try { found = await extractAnnouncements(email); } catch (err) {
+  try { found = await extractAnnouncements(email, attachments); } catch (err) {
     console.error('Announcement extraction failed', err.message);
     return sendJson(res, 502, { error: 'extraction_failed' }); // the script retries on its next run
   }
   const address = (email.from.match(/<([^>]+)>/) || [, email.from])[1].trim().toLowerCase();
   const trusted = TRUSTED_EMAIL_DOMAINS.some((d) => address.endsWith('@' + d));
   const fresh = loadAnnouncements(); // re-read: another email may have been saved meanwhile
-  const existing = new Set(fresh.entries.map(announcementKey));
+  // Files are written only once something actually uses them (a repeat email adds nothing new).
+  let saved = null;
+  const files = () => (saved = saved || saveEmailAttachments(attachments));
   for (const a of found) {
-    if (existing.has(announcementKey(a))) continue; // already have it from an earlier copy of this email
-    existing.add(announcementKey(a));
-    fresh.entries.push({ id: newId(), ...a, status: trusted ? 'live' : 'pending', from: email.from, subject: email.subject, emailId: body.messageId, receivedAt: Date.now() });
+    const dup = fresh.entries.find((e) => announcementKey(e) === announcementKey(a));
+    if (dup) { // already have it from an earlier copy of this email — just add flyers if it had none
+      if (attachments.length && !(dup.attachments || []).length) dup.attachments = files();
+      continue;
+    }
+    fresh.entries.push({ id: newId(), ...a, attachments: attachments.length ? files() : [], status: trusted ? 'live' : 'pending', from: email.from, subject: email.subject, emailId: body.messageId, receivedAt: Date.now() });
   }
   fresh.emailIds.push(body.messageId);
   saveAnnouncements(fresh);
-  console.log(`Inbound email "${email.subject}" from ${address}: ${found.length} announcement(s), ${trusted ? 'live' : 'awaiting approval'}`);
+  console.log(`Inbound email "${email.subject}" from ${address}: ${found.length} announcement(s), ${saved ? saved.length : 0} flyer(s) saved, ${trusted ? 'live' : 'awaiting approval'}`);
   sendJson(res, 200, { ok: true, announcements: found.length });
 });
 route('GET', '/api/admin/announcements', async (req, res) => {
@@ -1082,8 +1141,14 @@ route('PUT', '/api/admin/announcements/:id', async (req, res, params) => {
 route('DELETE', '/api/admin/announcements/:id', async (req, res, params) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
   const store = loadAnnouncements();
+  const removed = store.entries.find((e) => e.id === params.id);
   store.entries = store.entries.filter((e) => e.id !== params.id);
   saveAnnouncements(store);
+  const stillUsed = new Set(store.entries.flatMap((e) => (e.attachments || []).map((f) => f.path)));
+  for (const f of (removed && removed.attachments) || []) {
+    const p = path.join(UPLOADS_DIR, f.path);
+    if (!stillUsed.has(f.path) && fs.existsSync(p)) fs.unlinkSync(p);
+  }
   sendJson(res, 200, { ok: true });
 });
 

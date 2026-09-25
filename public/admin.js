@@ -292,6 +292,9 @@
             '<button data-act="del">Remove</button></div></div>' +
           '<div class="q-meta"><span class="q-topic">'+escapeHtml(a.category)+'</span> · ' + escapeHtml(a.branches.join(', ') || 'All branches') + ' · ' + escapeHtml(when) + ' · ' + status + '</div>' +
           '<div class="body">'+linkify(a.details)+'</div>' +
+          (a.attachments || []).map(function(f){
+            return '<div class="file-row">📎 <a href="/uploads/'+encodeURIComponent(f.path)+'" target="_blank" rel="noopener">'+escapeHtml(f.filename)+'</a></div>';
+          }).join('') +
           '<div class="q-meta">From “'+escapeHtml(a.subject)+'” — '+escapeHtml(a.from)+' · '+fmtDate(a.receivedAt)+'</div>';
         var approve = item.querySelector('[data-act="approve"]');
         approve && approve.addEventListener('click', function(){
