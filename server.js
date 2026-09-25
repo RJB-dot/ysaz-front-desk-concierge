@@ -199,6 +199,31 @@ function newId() {
 }
 ensureDataFiles();
 if (fs.existsSync(ANNOUNCEMENTS_FILE)) dedupeAnnouncements();
+
+// New answers (e.g. SOPs) can ship as files: seed/imports/*.json = { entries: [{ id, title, content }] }.
+// Each entry is added to the knowledge base once (remembered in imports-applied.json); after that it's
+// edited or deleted in /admin like any other answer and never re-added.
+const IMPORTS_DIR = path.join(__dirname, 'seed', 'imports');
+const IMPORTS_APPLIED_FILE = path.join(DATA_DIR, 'imports-applied.json');
+(function applyKbImports() {
+  if (!fs.existsSync(IMPORTS_DIR)) return;
+  const applied = new Set(fs.existsSync(IMPORTS_APPLIED_FILE) ? JSON.parse(fs.readFileSync(IMPORTS_APPLIED_FILE, 'utf8')) : []);
+  const kb = loadKb();
+  let added = 0;
+  for (const file of fs.readdirSync(IMPORTS_DIR).filter((f) => f.endsWith('.json')).sort()) {
+    for (const e of JSON.parse(fs.readFileSync(path.join(IMPORTS_DIR, file), 'utf8')).entries || []) {
+      if (!e.id || applied.has(e.id)) continue;
+      kb.entries.push({ id: newId(), title: String(e.title).trim(), content: String(e.content).trim(), attachment: null, updatedAt: Date.now() });
+      applied.add(e.id);
+      added++;
+    }
+  }
+  if (added) {
+    saveKb(kb);
+    fs.writeFileSync(IMPORTS_APPLIED_FILE, JSON.stringify([...applied], null, 2));
+    console.log(`Added ${added} knowledge base entr${added === 1 ? 'y' : 'ies'} from seed/imports`);
+  }
+})();
 // Shared secret the Gmail script sends with each email. Generated once and kept on the volume, so it
 // never has to be typed anywhere — admins copy the ready-made script from /admin.
 const INBOUND_SECRET = process.env.INBOUND_SECRET || (() => {
@@ -965,9 +990,11 @@ route('POST', '/api/chat', async (req, res, params, ip) => {
   }
 
   const instructions =
+    `Today is ${arizonaToday()}. ` +
     'You are the Front Desk Concierge assistant for YMCA of Southern Arizona. ' +
     'Front-line staff are asking you questions while a member is at the counter, so answer briefly and plainly, leading with the direct answer. ' +
     "Only use the knowledge base below and your search tools. If the knowledge base doesn't cover a question, use search_website to look across the whole tucsonymca.org site before giving up, and include the page link when you use it. If neither has the answer, say clearly that it isn't in the saved knowledge base or on the website, and suggest using Ask Support — never guess at hours, prices, or policy. " +
+    "If two saved answers disagree (for example older prices vs. a newer SOP with effective dates), follow the newer one, use the rates in effect on today's date, and mention upcoming changes. " +
     "Some entries are marked '(flyer attached)' — if one of those is relevant, mention that a flyer is available so staff know to show or print it. " +
     "Entries marked '(from the Y website …)' are the current text of a tucsonymca.org page, re-checked weekly; when you use one, include that page's link so staff can share it. " +
     "If a website page contradicts itself or a saved answer (for example two different dollar amounts), say so plainly and give both figures rather than picking one. " +
