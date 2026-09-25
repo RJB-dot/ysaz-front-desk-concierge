@@ -266,19 +266,41 @@ function findRelatedFlyers(kb, question) {
   const words = q.split(/\W+/).filter((w) => w.length > 3);
   return kb.entries.filter((e) => e.attachment && words.some((w) => e.title.toLowerCase().includes(w)));
 }
+// Runs the conversation, letting Claude call the program-search tool (a few rounds at most) before answering.
 async function callAnthropic(instructions, messages) {
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 1024, system: instructions, messages }),
-  });
-  if (!r.ok) {
-    const errText = await r.text();
-    console.error('Anthropic API error', r.status, errText);
-    throw new Error('upstream_error');
+  const convo = messages.slice();
+  for (let round = 0; round < 4; round++) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 4096, system: instructions, tools: [PROGRAM_SEARCH_TOOL], messages: convo }),
+    });
+    if (!r.ok) {
+      const errText = await r.text();
+      console.error('Anthropic API error', r.status, errText);
+      throw new Error('upstream_error');
+    }
+    const data = await r.json();
+    const content = data.content || [];
+    if (data.stop_reason !== 'tool_use') {
+      return content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+    }
+    // Echo the assistant turn back unchanged, then answer every tool call in one user message.
+    convo.push({ role: 'assistant', content });
+    const toolResults = await Promise.all(content.filter((b) => b.type === 'tool_use').map(async (b) => {
+      if (b.name !== PROGRAM_SEARCH_TOOL.name) return { type: 'tool_result', tool_use_id: b.id, content: 'Unknown tool', is_error: true };
+      try {
+        const result = await searchPrograms(b.input && b.input.keyword);
+        console.log(`Program search: "${b.input && b.input.keyword}" -> ${result.error || result.total_matches + ' sessions'}`);
+        return { type: 'tool_result', tool_use_id: b.id, content: JSON.stringify(result), is_error: !!result.error };
+      } catch (err) {
+        console.error('Program search error', err);
+        return { type: 'tool_result', tool_use_id: b.id, content: 'Program search failed: ' + (err.message || err), is_error: true };
+      }
+    }));
+    convo.push({ role: 'user', content: toolResults });
   }
-  const data = await r.json();
-  return (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+  throw new Error('upstream_error');
 }
 
 function escapeHtml(s) {
@@ -368,6 +390,146 @@ function webPagesText() {
   }).join('\n\n');
 }
 
+// ---------- live program search (Daxko online registration) ----------
+// Uses the same public search the Daxko "Program Search" page runs in the browser (no login needed).
+// Daxko matches ANY word in the keywords, so every search is expanded into variants (e.g. "volleyball",
+// "youth volleyball", "adult volleyball"), merged, then filtered down to sessions containing every word
+// staff asked about.
+const DAXKO_BASE = 'https://operations.daxko.com/Online/5242/ProgramsV2';
+// Extra words to also search with. Keyed by activity; everything else gets DEFAULT_SEARCH_MODIFIERS.
+const DEFAULT_SEARCH_MODIFIERS = ['youth', 'adult'];
+const SEARCH_MODIFIERS = {
+  swim: ['private', 'group', 'youth', 'adult'],
+};
+const DAXKO_MAX_PAGES = 3; // 20 sessions per page
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Daxko needs a session cookie: the first visit sets one and redirects back to itself (Node's fetch
+// doesn't keep cookies, so without this it loops). Daxko also rate-limits bursts (HTTP 429), so
+// requests go one at a time with a short gap and one retry.
+let daxkoCookie = { value: '', at: 0 };
+let daxkoLast = 0;
+async function daxkoPaced(url, opts) {
+  const wait = daxkoLast + 400 - Date.now();
+  if (wait > 0) await sleep(wait);
+  daxkoLast = Date.now();
+  return fetch(url, { ...opts, redirect: 'manual', signal: AbortSignal.timeout(20000) });
+}
+async function daxkoSession(force) {
+  if (!force && daxkoCookie.value && Date.now() - daxkoCookie.at < 15 * 60 * 1000) return daxkoCookie.value;
+  const jar = new Map();
+  let url = `${DAXKO_BASE}/Home.mvc`;
+  for (let hop = 0; hop < 5; hop++) {
+    const cookie = [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
+    const r = await daxkoPaced(url, { headers: { 'user-agent': 'Mozilla/5.0 (YMCA Front Desk Concierge)', ...(cookie ? { cookie } : {}) } });
+    for (const c of r.headers.getSetCookie ? r.headers.getSetCookie() : []) {
+      const [pair] = c.split(';'); const i = pair.indexOf('=');
+      if (i > 0) jar.set(pair.slice(0, i).trim(), pair.slice(i + 1).trim());
+    }
+    if (r.status < 300 || r.status >= 400) break;
+    url = new URL(r.headers.get('location'), url).toString();
+  }
+  daxkoCookie = { value: [...jar].map(([k, v]) => `${k}=${v}`).join('; '), at: Date.now() };
+  return daxkoCookie.value;
+}
+async function daxkoFetch(url, opts) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const cookie = await daxkoSession(attempt > 0);
+    const r = await daxkoPaced(url, { ...opts, headers: { ...opts.headers, cookie } });
+    if (r.status === 429) { await sleep(2000); continue; }
+    if (r.status >= 300 && r.status < 400) continue; // session expired — get a fresh cookie and retry
+    return r;
+  }
+  throw new Error('Daxko search unavailable (rate limited or session refused)');
+}
+
+function stripTags(s) {
+  return decodeEntities(String(s).replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+function parseDaxkoOfferings(html) {
+  return html.split('<li class="programResults__list-item').slice(1).map((li) => {
+    const attr = (name) => { const m = li.match(new RegExp(name + '="([^"]*)"')); return m ? m[1] : ''; };
+    const href = decodeEntities(attr('href'));
+    const ids = {};
+    for (const k of ['program_id', 'offering_id', 'location_id']) { const m = href.match(new RegExp(k + '=([^&]+)')); ids[k] = m ? m[1] : ''; }
+    const dates = li.match(/class="pull-left">([\s\S]*?)<\/div>\s*<\/div>/);
+    const times = li.match(/class="pull-right">([\s\S]*?)<\/div>/);
+    const after = li.split(/programResults__date-details/)[1] || '';
+    const desc = after.match(/<\/div>\s*<\/div>\s*<div>([\s\S]*?)<\/div>/);
+    const h5 = li.match(/<h5>([\s\S]*?)<\/h5>/);
+    return {
+      id: ids.offering_id + '@' + ids.location_id,
+      program: stripTags(h5 ? h5[1] : attr('data-enh-ec-program-name')),
+      session: stripTags(attr('data-enh-ec-name')),
+      location: stripTags(attr('data-enh-ec-location')),
+      dates: dates ? stripTags(dates[1]) : '',
+      schedule: times ? stripTags(times[1]).replace(/\s*@\s*/, ' @ ') : '',
+      description: desc ? stripTags(desc[1]) : '',
+      register: ids.offering_id ? `${DAXKO_BASE}/OfferingDetails.mvc?program_id=${ids.program_id}&offering_id=${ids.offering_id}&location_id=${ids.location_id}` : '',
+    };
+  });
+}
+const daxkoCache = new Map(); // keywords -> { at, offerings }
+async function daxkoSearchOnce(keywords) {
+  const hit = daxkoCache.get(keywords);
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.offerings;
+  const headers = { 'user-agent': 'Mozilla/5.0 (YMCA Front Desk Concierge)', 'x-requested-with': 'XMLHttpRequest', 'content-type': 'application/x-www-form-urlencoded' };
+  const body = new URLSearchParams({ keywords }).toString();
+  const r = await daxkoFetch(`${DAXKO_BASE}/Search.mvc/results`, { method: 'POST', headers, body });
+  if (!r.ok) throw new Error('Daxko HTTP ' + r.status);
+  const first = await r.json();
+  let html = first.results || '';
+  const offerings = parseDaxkoOfferings(html);
+  let after = (html.match(/id="after" value="([^"]*)"/) || [])[1];
+  for (let page = 1; after && page < DAXKO_MAX_PAGES; page++) {
+    const n = await daxkoFetch(`${DAXKO_BASE}/Search.mvc/next_page?after=${encodeURIComponent(after)}`, { method: 'POST', headers, body });
+    if (!n.ok) break;
+    const next = await n.json();
+    offerings.push(...parseDaxkoOfferings(next.offerings || ''));
+    after = next.after;
+  }
+  daxkoCache.set(keywords, { at: Date.now(), offerings });
+  return offerings;
+}
+// "lessons" should match "lesson", "swimming" should match "swim"
+function wordStem(w) { return w.replace(/(ming|ing|es|s)$/, '') || w; }
+async function searchPrograms(keyword) {
+  const term = String(keyword || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!term) return { error: 'empty keyword' };
+  const words = term.split(' ');
+  const activity = Object.keys(SEARCH_MODIFIERS).find((k) => words.some((w) => w.startsWith(k)));
+  const modifiers = activity ? SEARCH_MODIFIERS[activity] : DEFAULT_SEARCH_MODIFIERS;
+  const coreWords = words.filter((w) => !modifiers.includes(w) && !DEFAULT_SEARCH_MODIFIERS.includes(w));
+  const core = coreWords.join(' ') || term;
+  const queries = [...new Set([term, core, ...modifiers.filter((m) => !words.includes(m)).map((m) => `${m} ${core}`)])];
+  const results = [];
+  for (const q of queries) results.push(await daxkoSearchOnce(q).catch((e) => { console.error('Daxko search failed', q, e.message); return null; }));
+  if (results.every((r) => r === null)) return { error: 'Daxko program search is not responding right now' };
+  const seen = new Map();
+  for (const list of results) for (const o of list || []) if (!seen.has(o.id)) seen.set(o.id, o);
+  // Keep only sessions that mention every word staff asked about (both words in "youth basketball").
+  const stems = words.map(wordStem);
+  const matches = [...seen.values()].filter((o) => {
+    const text = `${o.program} ${o.session} ${o.description}`.toLowerCase();
+    return stems.every((s) => text.includes(s));
+  });
+  return { searched_for: queries, total_matches: matches.length, sessions: matches.slice(0, 40) };
+}
+
+const PROGRAM_SEARCH_TOOL = {
+  name: 'search_daxko_programs',
+  description:
+    "Searches the Y's live Daxko online registration for current program sessions (classes, lessons, leagues, camps, clubs). " +
+    'Returns each matching session with program name, session name, branch, dates, days/times, a short description, and a registration link. ' +
+    'Pass the activity the way staff asked about it, e.g. "volleyball", "swim lessons", "adult volleyball", "tumbling". ' +
+    'The search automatically also covers youth/adult versions (and private/group for swim).',
+  input_schema: {
+    type: 'object',
+    properties: { keyword: { type: 'string', description: 'Activity or program to look for, e.g. "swim lessons"' } },
+    required: ['keyword'],
+    additionalProperties: false,
+  },
+};
+
 // ---------- route table ----------
 const routes = [];
 function route(method, pattern, handler) {
@@ -432,7 +594,9 @@ route('POST', '/api/chat', async (req, res) => {
     "Only use the knowledge base below. If the answer isn't in it, say clearly that it isn't in the saved knowledge base yet and suggest checking with a supervisor — never guess at hours, prices, or policy. " +
     "Some entries are marked '(flyer attached)' — if one of those is relevant, mention that a flyer is available so staff know to show or print it. " +
     "Entries marked '(from the Y website …)' are the current text of a tucsonymca.org page, re-checked weekly; when you use one, include that page's link so staff can share it. " +
-    "If a website page contradicts itself or a saved answer (for example two different dollar amounts), say so plainly and give both figures rather than picking one.\n\n" +
+    "If a website page contradicts itself or a saved answer (for example two different dollar amounts), say so plainly and give both figures rather than picking one. " +
+    "When staff ask what programs, classes, lessons, leagues or sessions are offered (or when/where one is), use the search_daxko_programs tool — that's the live registration system — and list the matching sessions: program, branch, dates, days/times, and the registration link. Group them by program and branch so they're easy to scan. " +
+    "If the search finds nothing, say nothing is currently open for online registration in Daxko and point to the right department contact from the knowledge base. Don't list sessions that don't match what was asked.\n\n" +
     `=== KNOWLEDGE BASE ===\n${kbText(kb)}${webPagesText() ? '\n\n' + webPagesText() : ''}\n=== END KNOWLEDGE BASE ===`;
   const messages = [];
   if (Array.isArray(body.history)) {
