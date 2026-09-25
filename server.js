@@ -213,7 +213,15 @@ const IMPORTS_APPLIED_FILE = path.join(DATA_DIR, 'imports-applied.json');
   for (const file of fs.readdirSync(IMPORTS_DIR).filter((f) => f.endsWith('.json')).sort()) {
     for (const e of JSON.parse(fs.readFileSync(path.join(IMPORTS_DIR, file), 'utf8')).entries || []) {
       if (!e.id || applied.has(e.id)) continue;
-      kb.entries.push({ id: newId(), title: String(e.title).trim(), content: String(e.content).trim(), attachment: null, updatedAt: Date.now() });
+      let attachment = null;
+      if (e.attachment) {
+        const src = path.join(IMPORTS_DIR, 'files', e.attachment);
+        const storedName = `${newId()}-${e.attachment.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+        fs.copyFileSync(src, path.join(UPLOADS_DIR, storedName));
+        const ext = path.extname(e.attachment).toLowerCase();
+        attachment = { filename: e.attachmentTitle ? e.attachmentTitle + ext : e.attachment, path: storedName, contentType: { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }[ext] || 'application/octet-stream', validUntil: e.attachmentValidUntil || null };
+      }
+      kb.entries.push({ id: newId(), title: String(e.title).trim(), content: String(e.content).trim(), attachment, validUntil: e.validUntil || null, updatedAt: Date.now() });
       applied.add(e.id);
       added++;
     }
@@ -325,14 +333,29 @@ function isStaff(req) { if (!REQUIRE_STAFF_PASSCODE) return true; const c = pars
 function isAdmin(req) { const c = parseCookies(req); return verifyCookie(c.fdc_admin, 'admin'); }
 
 // ---------- chat helpers ----------
-function kbText(kb) {
-  if (!kb.entries.length) return '(no entries saved yet)';
-  return kb.entries.map((e) => `### ${e.title}${e.attachment ? ' (flyer attached)' : ''}\n${e.content}`).join('\n\n');
+// Answers and flyers can carry a validUntil date (YYYY-MM-DD, Arizona): after that day they're skipped
+// automatically — e.g. price sheets that stop being accurate when new rates start.
+function stillValid(validUntil) {
+  return !validUntil || validUntil >= arizonaISODate(Date.now());
 }
+function currentKbEntries(kb) {
+  return kb.entries.filter((e) => stillValid(e.validUntil));
+}
+function hasCurrentFlyer(e) {
+  return !!e.attachment && stillValid(e.attachment.validUntil);
+}
+function kbText(kb) {
+  const entries = currentKbEntries(kb);
+  if (!entries.length) return '(no entries saved yet)';
+  return entries.map((e) => `### ${e.title}${hasCurrentFlyer(e) ? ' (flyer attached)' : ''}${e.validUntil ? ` (valid through ${e.validUntil})` : ''}\n${e.content}`).join('\n\n');
+}
+// Words in nearly every title (e.g. "Branch Info — Lohse … (hours, phone, amenities, membership flyer)")
+// don't identify a flyer, so "Lohse hours" shouldn't pull up every branch's flyer.
+const FLYER_MATCH_IGNORE = new Set('hours phone amenities membership memberships flyer flyers branch info ymca what when where does have with about'.split(' '));
 function findRelatedFlyers(kb, question) {
   const q = question.toLowerCase();
-  const words = q.split(/\W+/).filter((w) => w.length > 3);
-  return kb.entries.filter((e) => e.attachment && words.some((w) => e.title.toLowerCase().includes(w)));
+  const words = q.split(/\W+/).filter((w) => w.length > 3 && !FLYER_MATCH_IGNORE.has(w));
+  return currentKbEntries(kb).filter((e) => hasCurrentFlyer(e) && words.some((w) => e.title.toLowerCase().includes(w)));
 }
 // Runs the conversation, letting Claude call the program-search tool (a few rounds at most) before answering.
 async function callAnthropic(instructions, messages) {

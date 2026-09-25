@@ -104,6 +104,10 @@
       var item = document.createElement('div');
       item.className = 'kb-item';
       var flyerHtml = '';
+      var today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Phoenix' });
+      var expiryHtml = '';
+      if(e.validUntil) expiryHtml += '<div class="q-meta'+(e.validUntil < today ? ' q-warn' : '')+'">'+(e.validUntil < today ? 'Expired ' : 'Used through ')+escapeHtml(e.validUntil)+(e.validUntil < today ? ' — the concierge no longer uses this answer' : '')+'</div>';
+      if(e.attachment && e.attachment.validUntil) expiryHtml += '<div class="q-meta'+(e.attachment.validUntil < today ? ' q-warn' : '')+'">Flyer '+(e.attachment.validUntil < today ? 'hidden since ' : 'shown through ')+escapeHtml(e.attachment.validUntil)+'</div>';
       if(e.attachment){
         flyerHtml = '<div class="file-row">📎 '+escapeHtml(e.attachment.filename || 'Flyer')+
           ' — <a href="/uploads/'+e.attachment.path+'" target="_blank" rel="noopener">view</a></div>';
@@ -111,7 +115,7 @@
       item.innerHTML =
         '<div class="row"><div class="ttl">'+escapeHtml(e.title)+'</div>' +
         '<div class="kb-actions"><button data-act="edit">Edit</button><button data-act="del">Delete</button></div></div>' +
-        '<div class="body">'+linkify(e.content)+'</div>' + flyerHtml;
+        '<div class="body">'+linkify(e.content)+'</div>' + flyerHtml + expiryHtml;
       item.querySelector('[data-act="edit"]').addEventListener('click', function(){ startEdit(e); });
       item.querySelector('[data-act="del"]').addEventListener('click', function(){
         if(!confirm('Delete "'+e.title+'"? This can\'t be undone.')) return;
