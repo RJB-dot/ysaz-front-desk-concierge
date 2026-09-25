@@ -33,6 +33,13 @@ const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const KB_FILE = path.join(DATA_DIR, 'kb.json');
 const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
+const WEB_PAGES_FILE = path.join(DATA_DIR, 'web-pages.json');
+
+// Pages on tucsonymca.org the concierge reads directly. Re-checked every Monday morning (Arizona time);
+// the latest text is included alongside the saved answers. Add a page here to have it checked too.
+const WEB_SOURCES = [
+  { url: 'https://tucsonymca.org/tax-credit/', title: 'YMCA Tax Credit Fund' },
+];
 const SEED_FILE = path.join(__dirname, 'seed', 'kb.seed.json');
 const SEED_UPLOADS_DIR = path.join(__dirname, 'seed', 'uploads');
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -137,6 +144,13 @@ function loadQuestions() {
 }
 function saveQuestions(q) {
   fs.writeFileSync(QUESTIONS_FILE, JSON.stringify(q, null, 2));
+}
+function loadWebPages() {
+  if (!fs.existsSync(WEB_PAGES_FILE)) return {};
+  return JSON.parse(fs.readFileSync(WEB_PAGES_FILE, 'utf8'));
+}
+function saveWebPages(p) {
+  fs.writeFileSync(WEB_PAGES_FILE, JSON.stringify(p, null, 2));
 }
 function loadKb() {
   return JSON.parse(fs.readFileSync(KB_FILE, 'utf8'));
@@ -284,6 +298,76 @@ async function sendEmailViaResend(to, subject, html, replyTo) {
   }
 }
 
+// ---------- weekly website check ----------
+function decodeEntities(s) {
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', rsquo: "'", lsquo: "'", rdquo: '"', ldquo: '"', ndash: '–', mdash: '—', hellip: '…' };
+  return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, code) => {
+    if (code[0] === '#') {
+      const n = code[1].toLowerCase() === 'x' ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+    }
+    return named[code.toLowerCase()] ?? m;
+  });
+}
+// Readable text from the page's <main> content (falls back to <body>), without menus/scripts.
+function htmlToText(html) {
+  const main = html.match(/<main[\s\S]*?<\/main>/i) || html.match(/<body[\s\S]*?<\/body>/i);
+  const text = (main ? main[0] : html)
+    .replace(/<(script|style|noscript|svg|header|footer|nav|form)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr|section)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  return decodeEntities(text).replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{2,}/g, '\n').trim();
+}
+async function checkWebSources() {
+  const pages = loadWebPages();
+  for (const src of WEB_SOURCES) {
+    const prev = pages[src.url] || {};
+    try {
+      const r = await fetch(src.url, { headers: { 'user-agent': 'Mozilla/5.0 (YMCA Front Desk Concierge weekly page check)' }, signal: AbortSignal.timeout(30000) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const text = htmlToText(await r.text()).slice(0, 30000);
+      if (text.length < 200) throw new Error('page came back nearly empty');
+      const hash = crypto.createHash('sha256').update(text).digest('hex');
+      const changed = hash !== prev.hash;
+      pages[src.url] = { title: src.title, text, hash, checkedAt: Date.now(), changedAt: changed ? Date.now() : prev.changedAt, error: null };
+      console.log(`Web page check: ${src.url} — ${prev.hash ? (changed ? 'CHANGED' : 'no change') : 'first copy saved'}`);
+    } catch (err) {
+      // Keep the last good copy so answers keep working; just record the failure.
+      pages[src.url] = { ...prev, title: src.title, checkedAt: Date.now(), error: String(err.message || err) };
+      console.error(`Web page check failed: ${src.url} — ${err.message || err}`);
+    }
+  }
+  saveWebPages(pages);
+}
+// Monday in Arizona (no daylight saving, so a fixed offset is safe via Intl).
+function arizonaDay() {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', hour12: false }).formatToParts(new Date());
+  const get = (t) => parts.find((p) => p.type === t).value;
+  return { weekday: get('weekday'), date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
+}
+let lastMondayCheck = null;
+function scheduleWebChecks() {
+  const pages = loadWebPages();
+  const missing = WEB_SOURCES.some((s) => !pages[s.url] || !pages[s.url].text);
+  const stale = WEB_SOURCES.some((s) => pages[s.url] && Date.now() - (pages[s.url].checkedAt || 0) > 7 * 24 * 3600 * 1000);
+  if (missing || stale) checkWebSources().catch((e) => console.error('Web page check error', e));
+  setInterval(() => {
+    const az = arizonaDay();
+    if (az.weekday === 'Mon' && az.hour >= 6 && lastMondayCheck !== az.date) {
+      lastMondayCheck = az.date;
+      checkWebSources().catch((e) => console.error('Web page check error', e));
+    }
+  }, 30 * 60 * 1000);
+}
+function webPagesText() {
+  const pages = loadWebPages();
+  return WEB_SOURCES.filter((s) => pages[s.url] && pages[s.url].text).map((s) => {
+    const p = pages[s.url];
+    const checked = new Date(p.checkedAt).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric', year: 'numeric' });
+    return `### ${p.title} (from the Y website: ${s.url} — checked ${checked})\n${p.text}`;
+  }).join('\n\n');
+}
+
 // ---------- route table ----------
 const routes = [];
 function route(method, pattern, handler) {
@@ -346,8 +430,10 @@ route('POST', '/api/chat', async (req, res) => {
     'You are the Front Desk Concierge assistant for YMCA of Southern Arizona. ' +
     'Front-line staff are asking you questions while a member is at the counter, so answer briefly and plainly, leading with the direct answer. ' +
     "Only use the knowledge base below. If the answer isn't in it, say clearly that it isn't in the saved knowledge base yet and suggest checking with a supervisor — never guess at hours, prices, or policy. " +
-    "Some entries are marked '(flyer attached)' — if one of those is relevant, mention that a flyer is available so staff know to show or print it.\n\n" +
-    `=== KNOWLEDGE BASE ===\n${kbText(kb)}\n=== END KNOWLEDGE BASE ===`;
+    "Some entries are marked '(flyer attached)' — if one of those is relevant, mention that a flyer is available so staff know to show or print it. " +
+    "Entries marked '(from the Y website …)' are the current text of a tucsonymca.org page, re-checked weekly; when you use one, include that page's link so staff can share it. " +
+    "If a website page contradicts itself or a saved answer (for example two different dollar amounts), say so plainly and give both figures rather than picking one.\n\n" +
+    `=== KNOWLEDGE BASE ===\n${kbText(kb)}${webPagesText() ? '\n\n' + webPagesText() : ''}\n=== END KNOWLEDGE BASE ===`;
   const messages = [];
   if (Array.isArray(body.history)) {
     for (const h of body.history.slice(-12)) {
@@ -411,6 +497,20 @@ route('PUT', '/api/admin/questions/:id', async (req, res, params) => {
   entry.handled = !!(body && body.handled);
   saveQuestions(q);
   sendJson(res, 200, entry);
+});
+
+route('GET', '/api/admin/web-pages', async (req, res) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const pages = loadWebPages();
+  sendJson(res, 200, WEB_SOURCES.map((s) => {
+    const p = pages[s.url] || {};
+    return { url: s.url, title: s.title, checkedAt: p.checkedAt || null, changedAt: p.changedAt || null, error: p.error || null, chars: p.text ? p.text.length : 0 };
+  }));
+});
+route('POST', '/api/admin/web-pages/check', async (req, res) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  await checkWebSources();
+  sendJson(res, 200, { ok: true });
 });
 
 route('GET', '/api/admin/kb', async (req, res) => {
@@ -520,6 +620,8 @@ const server = http.createServer(async (req, res) => {
   }
   sendJson(res, 404, { error: 'not_found' });
 });
+
+scheduleWebChecks();
 
 server.listen(PORT, () => {
   console.log(`Front Desk Concierge listening on :${PORT}${DEMO_MODE ? ' (DEMO MODE)' : ''}`);

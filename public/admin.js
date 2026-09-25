@@ -15,6 +15,8 @@
     qList: document.getElementById('q-list'),
     qOpenCount: document.getElementById('q-open-count'),
     qHint: document.getElementById('q-hint'),
+    webList: document.getElementById('web-list'),
+    webCheckNow: document.getElementById('web-check-now'),
   };
   var editingId = null;
   var editingEntry = null;
@@ -212,6 +214,33 @@
     });
   }
 
+  // ---------- tucsonymca.org pages the concierge reads (re-checked every Monday) ----------
+  function loadWebPages(){
+    fetch('/api/admin/web-pages').then(function(r){ return r.json(); }).then(function(pages){
+      els.webList.innerHTML = '';
+      pages.forEach(function(p){
+        var item = document.createElement('div');
+        item.className = 'kb-item';
+        var status = p.checkedAt
+          ? 'Last checked ' + fmtDate(p.checkedAt) + (p.changedAt ? ' · last changed ' + fmtDate(p.changedAt) : '')
+          : 'Not checked yet';
+        item.innerHTML =
+          '<div class="ttl">'+escapeHtml(p.title)+'</div>' +
+          '<div class="q-meta"><a href="'+escapeHtml(p.url)+'" target="_blank" rel="noopener">'+escapeHtml(p.url)+'</a></div>' +
+          '<div class="q-meta">'+status+'</div>' +
+          (p.error ? '<div class="q-meta q-warn">Last check failed ('+escapeHtml(p.error)+') — still using the previous copy.</div>' : '');
+        els.webList.appendChild(item);
+      });
+    }).catch(function(){ els.webList.innerHTML = '<div class="empty">Couldn\'t load website pages.</div>'; });
+  }
+  els.webCheckNow.addEventListener('click', function(){
+    els.webCheckNow.disabled = true; els.webCheckNow.textContent = 'Checking…';
+    fetch('/api/admin/web-pages/check', { method:'POST' }).then(loadWebPages).finally(function(){
+      els.webCheckNow.disabled = false; els.webCheckNow.textContent = 'Check now';
+    });
+  });
+
   loadList();
   loadQuestions();
+  loadWebPages();
 })();
