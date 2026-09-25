@@ -213,6 +213,15 @@ const IMPORTS_APPLIED_FILE = path.join(DATA_DIR, 'imports-applied.json');
   for (const file of fs.readdirSync(IMPORTS_DIR).filter((f) => f.endsWith('.json')).sort()) {
     for (const e of JSON.parse(fs.readFileSync(path.join(IMPORTS_DIR, file), 'utf8')).entries || []) {
       if (!e.id || applied.has(e.id)) continue;
+      // { id, update: "<exact title>", content } corrects an answer that's already live (once), keeping its flyer.
+      if (e.update) {
+        const target = kb.entries.find((k) => k.title === e.update);
+        if (target) { target.content = String(e.content).trim(); target.updatedAt = Date.now(); }
+        else console.warn(`Import ${e.id}: no answer titled "${e.update}" to update`);
+        applied.add(e.id);
+        added++;
+        continue;
+      }
       let attachment = null;
       if (e.attachment) {
         const src = path.join(IMPORTS_DIR, 'files', e.attachment);
@@ -229,7 +238,7 @@ const IMPORTS_APPLIED_FILE = path.join(DATA_DIR, 'imports-applied.json');
   if (added) {
     saveKb(kb);
     fs.writeFileSync(IMPORTS_APPLIED_FILE, JSON.stringify([...applied], null, 2));
-    console.log(`Added ${added} knowledge base entr${added === 1 ? 'y' : 'ies'} from seed/imports`);
+    console.log(`Applied ${added} knowledge base import${added === 1 ? '' : 's'} (new or updated answers) from seed/imports`);
   }
 })();
 // Shared secret the Gmail script sends with each email. Generated once and kept on the volume, so it
