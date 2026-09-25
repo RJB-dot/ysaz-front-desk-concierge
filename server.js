@@ -39,6 +39,11 @@ const WEB_PAGES_FILE = path.join(DATA_DIR, 'web-pages.json');
 // the latest text is included alongside the saved answers. Add a page here to have it checked too.
 const WEB_SOURCES = [
   { url: 'https://tucsonymca.org/tax-credit/', title: 'YMCA Tax Credit Fund' },
+  { url: 'https://tucsonymca.org/sports/', title: 'Sports Programs (overview)', sports: true },
+  { url: 'https://tucsonymca.org/youth-leagues/', title: 'Youth Sports Leagues (see "Upcoming Season Information" for the next seasons)', sports: true },
+  { url: 'https://tucsonymca.org/youth-clinics/', title: 'Youth Sports Clinics', sports: true },
+  { url: 'https://tucsonymca.org/active-youth-programs/', title: 'Active Youth Programs', sports: true },
+  { url: 'https://tucsonymca.org/adult-sports-and-programs/', title: 'Adult Sports & Programs', sports: true },
 ];
 const SEED_FILE = path.join(__dirname, 'seed', 'kb.seed.json');
 const SEED_UPLOADS_DIR = path.join(__dirname, 'seed', 'uploads');
@@ -347,7 +352,12 @@ async function checkWebSources() {
     try {
       const r = await fetch(src.url, { headers: { 'user-agent': 'Mozilla/5.0 (YMCA Front Desk Concierge weekly page check)' }, signal: AbortSignal.timeout(30000) });
       if (!r.ok) throw new Error('HTTP ' + r.status);
-      const text = htmlToText(await r.text()).slice(0, 30000);
+      let text = htmlToText(await r.text());
+      const menuEnd = text.indexOf('Account Login\n');
+      if (menuEnd !== -1 && menuEnd < 2500) text = text.slice(menuEnd + 'Account Login\n'.length);
+      const footer = text.indexOf('Follow Us On Our Socials');
+      if (footer !== -1) text = text.slice(0, footer);
+      text = text.trim().slice(0, 30000);
       if (text.length < 200) throw new Error('page came back nearly empty');
       const hash = crypto.createHash('sha256').update(text).digest('hex');
       const changed = hash !== prev.hash;
@@ -595,6 +605,7 @@ route('POST', '/api/chat', async (req, res) => {
     "Some entries are marked '(flyer attached)' — if one of those is relevant, mention that a flyer is available so staff know to show or print it. " +
     "Entries marked '(from the Y website …)' are the current text of a tucsonymca.org page, re-checked weekly; when you use one, include that page's link so staff can share it. " +
     "If a website page contradicts itself or a saved answer (for example two different dollar amounts), say so plainly and give both figures rather than picking one. " +
+    "For ANY sports question (leagues, clinics, basketball, volleyball, soccer, adult sports, coaching), use the tucsonymca.org sports pages below as the main source — the Youth Sports Leagues page's 'Upcoming Season Information' section has the next seasons (dates, grades, registration windows, fees). Also run search_daxko_programs to see if sessions are open right now; if Daxko shows none, answer from the sports pages (e.g. when the next season and its registration open) instead of just saying nothing is available. " +
     "When staff ask what programs, classes, lessons, leagues or sessions are offered (or when/where one is), use the search_daxko_programs tool — that's the live registration system — and list the matching sessions: program, branch, dates, days/times, and the registration link. Group them by program and branch so they're easy to scan. " +
     "If the search finds nothing, say nothing is currently open for online registration in Daxko and point to the right department contact from the knowledge base. Don't list sessions that don't match what was asked.\n\n" +
     `=== KNOWLEDGE BASE ===\n${kbText(kb)}${webPagesText() ? '\n\n' + webPagesText() : ''}\n=== END KNOWLEDGE BASE ===`;
