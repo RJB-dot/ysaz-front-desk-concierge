@@ -174,6 +174,17 @@ function loadAnnouncements() {
 function saveAnnouncements(a) {
   fs.writeFileSync(ANNOUNCEMENTS_FILE, JSON.stringify(a, null, 2));
 }
+// The same email often arrives more than once (several staff forward it); same title + start date = same announcement.
+function announcementKey(a) {
+  return String(a.title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + '|' + (a.starts || '');
+}
+function dedupeAnnouncements() {
+  const store = loadAnnouncements();
+  const seen = new Set();
+  const before = store.entries.length;
+  store.entries = store.entries.filter((a) => { const k = announcementKey(a); if (seen.has(k)) return false; seen.add(k); return true; });
+  if (store.entries.length !== before) { saveAnnouncements(store); console.log(`Removed ${before - store.entries.length} duplicate announcement(s)`); }
+}
 function loadKb() {
   return JSON.parse(fs.readFileSync(KB_FILE, 'utf8'));
 }
@@ -184,6 +195,7 @@ function newId() {
   return crypto.randomBytes(9).toString('hex');
 }
 ensureDataFiles();
+if (fs.existsSync(ANNOUNCEMENTS_FILE)) dedupeAnnouncements();
 // Shared secret the Gmail script sends with each email. Generated once and kept on the volume, so it
 // never has to be typed anywhere — admins copy the ready-made script from /admin.
 const INBOUND_SECRET = process.env.INBOUND_SECRET || (() => {
@@ -1037,7 +1049,10 @@ route('POST', '/api/inbound-email', async (req, res) => {
   const address = (email.from.match(/<([^>]+)>/) || [, email.from])[1].trim().toLowerCase();
   const trusted = TRUSTED_EMAIL_DOMAINS.some((d) => address.endsWith('@' + d));
   const fresh = loadAnnouncements(); // re-read: another email may have been saved meanwhile
+  const existing = new Set(fresh.entries.map(announcementKey));
   for (const a of found) {
+    if (existing.has(announcementKey(a))) continue; // already have it from an earlier copy of this email
+    existing.add(announcementKey(a));
     fresh.entries.push({ id: newId(), ...a, status: trusted ? 'live' : 'pending', from: email.from, subject: email.subject, emailId: body.messageId, receivedAt: Date.now() });
   }
   fresh.emailIds.push(body.messageId);
