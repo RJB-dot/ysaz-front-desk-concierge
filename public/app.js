@@ -9,6 +9,16 @@
     scrim: document.getElementById('scrim'),
     rail: document.getElementById('rail'),
     logoutBtn: document.getElementById('logout-btn'),
+    askSupportBtn: document.getElementById('ask-support-btn'),
+    dlg: document.getElementById('support-dialog'),
+    sForm: document.getElementById('support-form'),
+    sQuestion: document.getElementById('s-question'),
+    sName: document.getElementById('s-name'),
+    sBranch: document.getElementById('s-branch'),
+    sDetails: document.getElementById('s-details'),
+    sStatus: document.getElementById('s-status'),
+    sSend: document.getElementById('s-send'),
+    sCancel: document.getElementById('s-cancel'),
   };
   var history = [];
 
@@ -79,6 +89,59 @@
     });
   }
 
+  // ---------- "Ask Support": send a question the concierge couldn't answer ----------
+  // Name + branch are remembered on this computer so staff don't retype them every time.
+  function remembered(key){ try { return localStorage.getItem(key) || ''; } catch(e){ return ''; } }
+  function remember(key, val){ try { localStorage.setItem(key, val); } catch(e){} }
+
+  function openSupport(question){
+    els.sQuestion.value = question || '';
+    els.sName.value = remembered('fdc_name');
+    els.sBranch.value = remembered('fdc_branch');
+    els.sDetails.value = '';
+    els.sStatus.textContent = ''; els.sStatus.className = 'dlg-status';
+    els.sSend.disabled = false;
+    els.rail.classList.remove('open'); els.scrim.hidden = true;
+    els.dlg.showModal();
+    (question ? (els.sName.value ? els.sDetails : els.sName) : els.sQuestion).focus();
+  }
+  els.askSupportBtn.addEventListener('click', function(){ openSupport(''); });
+  els.sCancel.addEventListener('click', function(){ els.dlg.close(); });
+
+  els.sForm.addEventListener('submit', function(ev){
+    ev.preventDefault();
+    var payload = {
+      question: els.sQuestion.value.trim(), name: els.sName.value.trim(),
+      branch: els.sBranch.value.trim(), details: els.sDetails.value.trim()
+    };
+    if(!payload.question || !payload.name){ els.sStatus.textContent = 'Question and your name are both required.'; els.sStatus.className = 'dlg-status err'; return; }
+    remember('fdc_name', payload.name); remember('fdc_branch', payload.branch);
+    els.sSend.disabled = true;
+    els.sStatus.textContent = 'Sending…'; els.sStatus.className = 'dlg-status';
+    fetch('/api/questions', {
+      method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify(payload)
+    }).then(function(r){
+      if(r.status === 401){ window.location.href = '/'; return; }
+      if(!r.ok){ throw new Error(r.status === 429 ? 'rate' : 'fail'); }
+      els.dlg.close();
+      addNote('✓ Sent to Support: "' + payload.question + '"');
+    }).catch(function(err){
+      els.sSend.disabled = false;
+      els.sStatus.textContent = err && err.message === 'rate'
+        ? 'Too many questions sent from this computer — try again in a few minutes.'
+        : "Couldn't send that — check your connection and try again.";
+      els.sStatus.className = 'dlg-status err';
+    });
+  });
+
+  function addSupportLink(afterEl, question){
+    var a = document.createElement('button');
+    a.type = 'button'; a.className = 'support-link';
+    a.textContent = "Didn't answer it? Send to Support";
+    a.addEventListener('click', function(){ openSupport(question); });
+    afterEl.appendChild(a);
+  }
+
   els.composer.addEventListener('submit', function(ev){
     ev.preventDefault();
     var question = els.q.value.trim();
@@ -101,6 +164,7 @@
       if(!res.ok){
         bubble.classList.remove('pending');
         bubble.textContent = "Sorry — something went wrong answering that. Try again in a moment.";
+        if(bubble.parentElement) addSupportLink(bubble.parentElement, question);
         return;
       }
       bubble.classList.remove('pending');
@@ -108,6 +172,7 @@
       if(res.data.flyers && res.data.flyers.length && bubble.parentElement){
         appendFlyerChips(bubble.parentElement, res.data.flyers);
       }
+      if(bubble.parentElement) addSupportLink(bubble.parentElement, question);
       history.push({ role:'user', content: question });
       history.push({ role:'assistant', content: res.data.answer || '' });
       if(history.length > 12) history = history.slice(-12);

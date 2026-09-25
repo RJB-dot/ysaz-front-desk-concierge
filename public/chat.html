@@ -21,6 +21,7 @@
     <div id="rail-foot">
       <div class="kb-status" id="kb-status"><span class="dot"></span><span>Ask about hours, pricing, policies, or programs</span></div>
       <a id="staff-directory-btn" href="https://docs.google.com/spreadsheets/d/1ep60UGGmxN5e9I5QG86-6VkUhA1GZB0NNzNkwlPzKpM/edit?usp=sharing" target="_blank" rel="noopener">👥 Staff Directory</a>
+      <button id="ask-support-btn" type="button">✉ Ask Support</button>
       <button id="logout-btn" type="button">Log out</button>
     </div>
   </nav>
@@ -41,6 +42,26 @@
     </div>
   </main>
 </div>
+
+<dialog id="support-dialog">
+  <form id="support-form">
+    <h2>Send a question to Support</h2>
+    <p class="dlg-sub">Couldn't find the answer? Support will follow up, and the answer can be added here for next time.</p>
+    <label for="s-question">Question</label>
+    <textarea id="s-question" rows="3" required></textarea>
+    <label for="s-name">Your name</label>
+    <input id="s-name" type="text" autocomplete="name" required>
+    <label for="s-branch">Branch (optional)</label>
+    <input id="s-branch" type="text" placeholder="e.g. Lohse YMCA">
+    <label for="s-details">Anything else Support should know? (optional)</label>
+    <textarea id="s-details" rows="2" placeholder="e.g. member's name and phone number so Support can call them back"></textarea>
+    <div class="dlg-status" id="s-status"></div>
+    <div class="dlg-actions">
+      <button type="button" class="dlg-btn" id="s-cancel">Cancel</button>
+      <button type="submit" class="dlg-btn primary" id="s-send">Send to Support</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="/app.js"></script>
 </body>

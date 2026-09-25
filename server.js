@@ -32,6 +32,7 @@ const PORT = process.env.PORT || 8080;
 const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const KB_FILE = path.join(DATA_DIR, 'kb.json');
+const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
 const SEED_FILE = path.join(__dirname, 'seed', 'kb.seed.json');
 const SEED_UPLOADS_DIR = path.join(__dirname, 'seed', 'uploads');
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -42,10 +43,16 @@ const SESSION_SECRET = process.env.SESSION_SECRET || '';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
 const DEMO_MODE = !ANTHROPIC_API_KEY;
+// Optional: email staff-submitted questions via Resend (resend.com). Until RESEND_API_KEY is set,
+// questions are still saved and listed in /admin — they just aren't emailed.
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const EMAIL_FROM = process.env.EMAIL_FROM || 'Front Desk Concierge <onboarding@resend.dev>';
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@tucsonymca.org';
 
 if (!SESSION_SECRET) console.warn('WARNING: SESSION_SECRET is not set. Login cookies will use an insecure fallback key. Set SESSION_SECRET before going live.');
 if (!STAFF_PASSCODE) console.warn('WARNING: STAFF_PASSCODE is not set — the staff gate will reject everyone until it is.');
 if (!ADMIN_PASSWORD) console.warn('WARNING: ADMIN_PASSWORD is not set — /admin will reject everyone until it is.');
+if (!RESEND_API_KEY) console.warn('NOTE: RESEND_API_KEY is not set — staff questions will be saved to /admin but not emailed to ' + SUPPORT_EMAIL + '.');
 if (DEMO_MODE) console.warn('DEMO MODE: no ANTHROPIC_API_KEY set — chat answers will be canned placeholders, not real Claude responses.');
 
 // ---------- signed-cookie auth ----------
@@ -95,16 +102,16 @@ function appendHeader(res, name, value) {
   else res.setHeader(name, [existing, value]);
 }
 
-// ---------- tiny in-memory rate limiter for the two login endpoints ----------
+// ---------- tiny in-memory rate limiter (login endpoints + question submissions) ----------
 const attempts = new Map();
-function rateLimited(ip) {
+function rateLimited(ip, bucket = 'login', max = 10) {
   const now = Date.now();
   const windowMs = 15 * 60 * 1000;
-  const max = 10;
-  let rec = attempts.get(ip);
+  const key = bucket + ':' + ip;
+  let rec = attempts.get(key);
   if (!rec || now > rec.resetAt) {
     rec = { count: 0, resetAt: now + windowMs };
-    attempts.set(ip, rec);
+    attempts.set(key, rec);
   }
   rec.count += 1;
   return rec.count > max;
@@ -123,6 +130,13 @@ function ensureDataFiles() {
     }
     console.log(`Seeded ${seed.entries.length} knowledge base entries into ${KB_FILE}`);
   }
+}
+function loadQuestions() {
+  if (!fs.existsSync(QUESTIONS_FILE)) return { entries: [] };
+  return JSON.parse(fs.readFileSync(QUESTIONS_FILE, 'utf8'));
+}
+function saveQuestions(q) {
+  fs.writeFileSync(QUESTIONS_FILE, JSON.stringify(q, null, 2));
 }
 function loadKb() {
   return JSON.parse(fs.readFileSync(KB_FILE, 'utf8'));
@@ -253,6 +267,23 @@ async function callAnthropic(instructions, messages) {
   return (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
 }
 
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+async function sendEmailViaResend(to, subject, html, replyTo) {
+  const payload = { from: EMAIL_FROM, to: [to], subject, html };
+  if (replyTo) payload.reply_to = replyTo;
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer ' + RESEND_API_KEY },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    console.error('Resend error', r.status, await r.text());
+    throw new Error('email_failed');
+  }
+}
+
 // ---------- route table ----------
 const routes = [];
 function route(method, pattern, handler) {
@@ -331,6 +362,55 @@ route('POST', '/api/chat', async (req, res) => {
   } catch {
     sendJson(res, 502, { error: 'upstream_error' });
   }
+});
+
+// Front desk staff send a question the concierge couldn't answer. Always saved (listed in /admin);
+// also emailed to SUPPORT_EMAIL when Resend is configured.
+route('POST', '/api/questions', async (req, res, params, ip) => {
+  if (!isStaff(req) && !isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  if (rateLimited(ip, 'questions', 20)) return sendJson(res, 429, { error: 'rate_limited' });
+  const body = await readJsonBody(req, 20000).catch(() => null);
+  const clip = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
+  const question = clip(body && body.question, 2000);
+  const name = clip(body && body.name, 100);
+  if (!question || !name) return sendJson(res, 400, { error: 'missing_fields' });
+  const entry = {
+    id: newId(), question, name,
+    branch: clip(body.branch, 100), details: clip(body.details, 4000),
+    createdAt: Date.now(), handled: false, emailed: false,
+  };
+
+  if (RESEND_API_KEY) {
+    const row = (label, val) => val ? `<p><strong>${label}:</strong><br>${escapeHtml(val).replace(/\n/g, '<br>')}</p>` : '';
+    const html =
+      "<p>A front desk staff member asked a question the Front Desk Concierge couldn't answer.</p>" +
+      row('Question', entry.question) + row('From', entry.name) + row('Branch', entry.branch) + row('Details', entry.details) +
+      '<p style="color:#666;font-size:12px">Once it&#39;s answered, add it to the knowledge base at /admin so the concierge can answer it next time.</p>';
+    try {
+      await sendEmailViaResend(SUPPORT_EMAIL, 'Front desk question: ' + entry.question.slice(0, 80), html);
+      entry.emailed = true;
+    } catch { /* still saved below — shows as "not emailed" in /admin */ }
+  }
+
+  const q = loadQuestions();
+  q.entries.push(entry);
+  saveQuestions(q);
+  sendJson(res, 200, { ok: true, emailed: entry.emailed });
+});
+route('GET', '/api/admin/questions', async (req, res) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const entries = loadQuestions().entries.slice().sort((a, b) => (a.handled - b.handled) || (b.createdAt - a.createdAt));
+  sendJson(res, 200, entries);
+});
+route('PUT', '/api/admin/questions/:id', async (req, res, params) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const body = await readJsonBody(req, 4096).catch(() => null);
+  const q = loadQuestions();
+  const entry = q.entries.find((e) => e.id === params.id);
+  if (!entry) return sendJson(res, 404, { error: 'not_found' });
+  entry.handled = !!(body && body.handled);
+  saveQuestions(q);
+  sendJson(res, 200, entry);
 });
 
 route('GET', '/api/admin/kb', async (req, res) => {

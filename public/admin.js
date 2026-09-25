@@ -12,6 +12,9 @@
     list: document.getElementById('kb-list'),
     count: document.getElementById('kb-count'),
     logout: document.getElementById('logout-link'),
+    qList: document.getElementById('q-list'),
+    qOpenCount: document.getElementById('q-open-count'),
+    qHint: document.getElementById('q-hint'),
   };
   var editingId = null;
   var editingEntry = null;
@@ -159,5 +162,56 @@
     }
   }).catch(function(){});
 
+  // ---------- questions staff sent to Support ----------
+  function fmtDate(ms){
+    return new Date(ms).toLocaleString([], { month:'short', day:'numeric', hour:'numeric', minute:'2-digit' });
+  }
+  function loadQuestions(){
+    fetch('/api/admin/questions').then(function(r){ return r.json(); }).then(renderQuestions).catch(function(){
+      els.qList.innerHTML = '<div class="empty">Couldn\'t load staff questions.</div>';
+    });
+  }
+  function setHandled(q, handled){
+    fetch('/api/admin/questions/'+q.id, {
+      method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify({ handled: handled })
+    }).then(loadQuestions);
+  }
+  function renderQuestions(entries){
+    var open = entries.filter(function(q){ return !q.handled; });
+    els.qOpenCount.textContent = open.length;
+    els.qHint.textContent = entries.length
+      ? 'Once a question is answered, click "Add as answer" so the concierge knows it next time, then mark it handled.'
+      : '';
+    if(!entries.length){
+      els.qList.innerHTML = '<div class="empty">No questions yet. When front desk staff use "Ask Support", they\'ll show up here.</div>';
+      return;
+    }
+    els.qList.innerHTML = '';
+    entries.forEach(function(q){
+      var item = document.createElement('div');
+      item.className = 'kb-item q-item' + (q.handled ? ' handled' : '');
+      var meta = escapeHtml(q.name) + (q.branch ? ' · ' + escapeHtml(q.branch) : '') + ' · ' + fmtDate(q.createdAt) +
+        (q.emailed ? ' · emailed to Support' : ' · <span class="q-warn">not emailed</span>');
+      item.innerHTML =
+        '<div class="row"><div class="ttl">'+escapeHtml(q.question)+'</div>' +
+        '<div class="kb-actions">' +
+          (q.handled ? '' : '<button data-act="answer">Add as answer</button>') +
+          '<button data-act="toggle">'+(q.handled ? 'Reopen' : 'Mark handled')+'</button>' +
+        '</div></div>' +
+        '<div class="q-meta">'+meta+'</div>' +
+        (q.details ? '<div class="body">'+linkify(q.details)+'</div>' : '');
+      var answerBtn = item.querySelector('[data-act="answer"]');
+      answerBtn && answerBtn.addEventListener('click', function(){
+        resetForm();
+        els.title.value = q.question;
+        els.content.focus();
+        els.form.scrollIntoView({ behavior:'smooth', block:'start' });
+      });
+      item.querySelector('[data-act="toggle"]').addEventListener('click', function(){ setHandled(q, !q.handled); });
+      els.qList.appendChild(item);
+    });
+  }
+
   loadList();
+  loadQuestions();
 })();
