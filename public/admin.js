@@ -214,30 +214,57 @@
     });
   }
 
-  // ---------- tucsonymca.org pages the concierge reads (re-checked every Monday) ----------
+  // ---------- tucsonymca.org: weekly download of every page + out-of-date review ----------
+  var webPoll = null;
   function loadWebPages(){
-    fetch('/api/admin/web-pages').then(function(r){ return r.json(); }).then(function(pages){
+    fetch('/api/admin/web-pages').then(function(r){ return r.json(); }).then(function(d){
       els.webList.innerHTML = '';
-      pages.forEach(function(p){
+      var summary = document.createElement('div');
+      summary.className = 'q-meta';
+      summary.innerHTML = d.running
+        ? '⏳ Checking the website now (downloading every page, then reviewing it) — this takes a few minutes…'
+        : (d.crawledAt ? d.pageCount + ' pages downloaded ' + fmtDate(d.crawledAt) : 'Not downloaded yet') +
+          (d.failed.length ? ' · <span class="q-warn">' + d.failed.length + ' failed</span>' : '') +
+          (d.reviewedAt ? ' · last reviewed ' + fmtDate(d.reviewedAt) + (d.emailed ? ' (emailed to Support)' : '') : ' · not reviewed yet');
+      els.webList.appendChild(summary);
+
+      var h = document.createElement('h3');
+      h.className = 'web-sub';
+      var total = d.issues.reduce(function(n, p){ return n + p.items.length; }, 0);
+      h.textContent = d.reviewedAt ? (total ? 'May be out of date (' + total + ')' : 'Nothing out of date found in the last review') : '';
+      if(h.textContent) els.webList.appendChild(h);
+      d.issues.forEach(function(p){
         var item = document.createElement('div');
         item.className = 'kb-item';
-        var status = p.checkedAt
-          ? 'Last checked ' + fmtDate(p.checkedAt) + (p.changedAt ? ' · last changed ' + fmtDate(p.changedAt) : '')
-          : 'Not checked yet';
-        item.innerHTML =
-          '<div class="ttl">'+escapeHtml(p.title)+'</div>' +
-          '<div class="q-meta"><a href="'+escapeHtml(p.url)+'" target="_blank" rel="noopener">'+escapeHtml(p.url)+'</a></div>' +
-          '<div class="q-meta">'+status+'</div>' +
-          (p.error ? '<div class="q-meta q-warn">Last check failed ('+escapeHtml(p.error)+') — still using the previous copy.</div>' : '');
+        item.innerHTML = '<div class="ttl"><a href="'+escapeHtml(p.url)+'" target="_blank" rel="noopener">'+escapeHtml(p.title)+'</a></div>' +
+          p.items.map(function(i){
+            return '<div class="body">' + (i.isNew ? '<span class="q-topic">NEW</span> ' : '') + '“' + escapeHtml(i.quote) + '”<br><span class="q-meta">' + escapeHtml(i.problem) + '</span></div>';
+          }).join('');
         els.webList.appendChild(item);
       });
-    }).catch(function(){ els.webList.innerHTML = '<div class="empty">Couldn\'t load website pages.</div>'; });
+
+      var ph = document.createElement('h3');
+      ph.className = 'web-sub';
+      ph.textContent = 'Always included with every question';
+      els.webList.appendChild(ph);
+      d.pinned.forEach(function(p){
+        var item = document.createElement('div');
+        item.className = 'q-meta';
+        item.innerHTML = '<a href="'+escapeHtml(p.url)+'" target="_blank" rel="noopener">'+escapeHtml(p.title)+'</a>' +
+          (p.changedAt ? ' · last changed ' + fmtDate(p.changedAt) : '') + (p.error ? ' · <span class="q-warn">last check failed</span>' : '');
+        els.webList.appendChild(item);
+      });
+
+      els.webCheckNow.disabled = d.running;
+      els.webCheckNow.textContent = d.running ? 'Checking…' : 'Check now';
+      clearTimeout(webPoll);
+      if(d.running) webPoll = setTimeout(loadWebPages, 10000);
+    }).catch(function(){ els.webList.innerHTML = '<div class="empty">Couldn\'t load website status.</div>'; });
   }
   els.webCheckNow.addEventListener('click', function(){
+    if(!confirm('Download every tucsonymca.org page and review it for out-of-date content now? It takes a few minutes, costs about $0.70 in Claude usage, and emails Support if it finds anything.')) return;
     els.webCheckNow.disabled = true; els.webCheckNow.textContent = 'Checking…';
-    fetch('/api/admin/web-pages/check', { method:'POST' }).then(loadWebPages).finally(function(){
-      els.webCheckNow.disabled = false; els.webCheckNow.textContent = 'Check now';
-    });
+    fetch('/api/admin/web-pages/check', { method:'POST' }).then(function(){ setTimeout(loadWebPages, 1500); });
   });
 
   loadList();

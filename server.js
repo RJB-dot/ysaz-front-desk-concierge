@@ -34,9 +34,13 @@ const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const KB_FILE = path.join(DATA_DIR, 'kb.json');
 const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
 const WEB_PAGES_FILE = path.join(DATA_DIR, 'web-pages.json');
+const WEB_REVIEW_FILE = path.join(DATA_DIR, 'web-review.json');
 
-// Pages on tucsonymca.org the concierge reads directly. Re-checked every Monday morning (Arizona time);
-// the latest text is included alongside the saved answers. Add a page here to have it checked too.
+// Every page in the tucsonymca.org page sitemap is downloaded every Monday morning (Arizona time) and
+// searchable by the concierge; Claude then reviews each page for out-of-date content and emails
+// SUPPORT_EMAIL a list. The pages below are "pinned": always included with every question, not just
+// when a search finds them.
+const SITEMAP_URL = 'https://tucsonymca.org/page-sitemap.xml';
 const WEB_SOURCES = [
   { url: 'https://tucsonymca.org/tax-credit/', title: 'YMCA Tax Credit Fund' },
   { url: 'https://tucsonymca.org/sports/', title: 'Sports Programs (overview)', sports: true },
@@ -278,7 +282,7 @@ async function callAnthropic(instructions, messages) {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 4096, system: instructions, tools: [PROGRAM_SEARCH_TOOL], messages: convo }),
+      body: JSON.stringify({ model: ANTHROPIC_MODEL, max_tokens: 4096, system: instructions, tools: [PROGRAM_SEARCH_TOOL, WEBSITE_SEARCH_TOOL], messages: convo }),
     });
     if (!r.ok) {
       const errText = await r.text();
@@ -293,6 +297,11 @@ async function callAnthropic(instructions, messages) {
     // Echo the assistant turn back unchanged, then answer every tool call in one user message.
     convo.push({ role: 'assistant', content });
     const toolResults = await Promise.all(content.filter((b) => b.type === 'tool_use').map(async (b) => {
+      if (b.name === WEBSITE_SEARCH_TOOL.name) {
+        const result = searchWebsite(b.input && b.input.query);
+        console.log(`Website search: "${b.input && b.input.query}" -> ${result.error || result.results.length + ' pages'}`);
+        return { type: 'tool_result', tool_use_id: b.id, content: JSON.stringify(result), is_error: !!result.error };
+      }
       if (b.name !== PROGRAM_SEARCH_TOOL.name) return { type: 'tool_result', tool_use_id: b.id, content: 'Unknown tool', is_error: true };
       try {
         const result = await searchPrograms(b.input && b.input.keyword);
@@ -338,56 +347,202 @@ function decodeEntities(s) {
 }
 // Readable text from the page's <main> content (falls back to <body>), without menus/scripts.
 function htmlToText(html) {
-  const main = html.match(/<main[\s\S]*?<\/main>/i) || html.match(/<body[\s\S]*?<\/body>/i);
-  const text = (main ? main[0] : html)
+  // Some pages have no <main>; for those take everything to the LAST </body> (scripts can contain an
+  // early "</body>" string that would otherwise cut the page off).
+  const main = html.match(/<main[\s\S]*?<\/main>/i);
+  const bodyStart = html.search(/<body/i), bodyEnd = html.lastIndexOf('</body>');
+  const text = (main ? main[0] : bodyStart !== -1 && bodyEnd > bodyStart ? html.slice(bodyStart, bodyEnd) : html)
     .replace(/<(script|style|noscript|svg|header|footer|nav|form)[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr|section)>/gi, '\n')
     .replace(/<[^>]+>/g, ' ');
   return decodeEntities(text).replace(/[ \t]+/g, ' ').replace(/ *\n */g, '\n').replace(/\n{2,}/g, '\n').trim();
 }
-async function checkWebSources() {
+function loadWebReview() {
+  if (!fs.existsSync(WEB_REVIEW_FILE)) return {};
+  return JSON.parse(fs.readFileSync(WEB_REVIEW_FILE, 'utf8'));
+}
+function saveWebReview(r) {
+  fs.writeFileSync(WEB_REVIEW_FILE, JSON.stringify(r, null, 2));
+}
+const PAGE_UA = 'Mozilla/5.0 (YMCA Front Desk Concierge weekly page check)';
+async function sitemapUrls() {
+  const r = await fetch(SITEMAP_URL, { headers: { 'user-agent': PAGE_UA }, signal: AbortSignal.timeout(30000) });
+  if (!r.ok) throw new Error('sitemap HTTP ' + r.status);
+  const xml = await r.text();
+  return [...xml.matchAll(/<loc>(?:<!\[CDATA\[)?\s*([^<\]\s]+)/g)].map((m) => m[1])
+    .filter((u) => /^https:\/\/tucsonymca\.org\//.test(u) && !/\/product\//.test(u));
+}
+async function fetchPage(url) {
+  const r = await fetch(url, { headers: { 'user-agent': PAGE_UA }, signal: AbortSignal.timeout(30000) });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  const html = await r.text();
+  const titleTag = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+  const title = decodeEntities(titleTag).replace(/\s*[-|–]\s*YMCA of Southern Arizona\s*$/i, '').trim();
+  let text = htmlToText(html);
+  // Trim the site-wide menu (everything up to "Account Login") and footer ("Follow Us On Our Socials!").
+  const menuEnd = text.indexOf('Account Login\n');
+  if (menuEnd !== -1 && menuEnd < 2500) text = text.slice(menuEnd + 'Account Login\n'.length);
+  const footer = text.indexOf('Follow Us On Our Socials');
+  if (footer !== -1) text = text.slice(0, footer);
+  return { title, text: text.trim().slice(0, 30000) };
+}
+
+// Downloads every page (pinned + sitemap). With review=true, also has Claude look for out-of-date
+// content and emails support. Only one run at a time; a second call just waits for the running one.
+let webCheckRunning = null;
+function checkWebSources({ review = false } = {}) {
+  if (!webCheckRunning) {
+    webCheckRunning = runWebCheck(review).catch((e) => console.error('Web page check error', e)).finally(() => { webCheckRunning = null; });
+  }
+  return webCheckRunning;
+}
+async function runWebCheck(review) {
   const pages = loadWebPages();
-  for (const src of WEB_SOURCES) {
-    const prev = pages[src.url] || {};
+  let urls = [];
+  try { urls = await sitemapUrls(); } catch (err) { console.error('Sitemap failed, checking pinned pages only —', err.message); }
+  const pinned = new Map(WEB_SOURCES.map((s) => [s.url, s]));
+  urls = [...new Set([...WEB_SOURCES.map((s) => s.url), ...urls])];
+  const fresh = {};
+  let changed = 0, failed = [];
+  for (const url of urls) {
+    const prev = pages[url] || {};
     try {
-      const r = await fetch(src.url, { headers: { 'user-agent': 'Mozilla/5.0 (YMCA Front Desk Concierge weekly page check)' }, signal: AbortSignal.timeout(30000) });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      let text = htmlToText(await r.text());
-      const menuEnd = text.indexOf('Account Login\n');
-      if (menuEnd !== -1 && menuEnd < 2500) text = text.slice(menuEnd + 'Account Login\n'.length);
-      const footer = text.indexOf('Follow Us On Our Socials');
-      if (footer !== -1) text = text.slice(0, footer);
-      text = text.trim().slice(0, 30000);
-      if (text.length < 200) throw new Error('page came back nearly empty');
+      const { title, text: raw } = await fetchPage(url);
+      // A page that loads but has no real text is itself a website problem — reported in the review.
+      const blank = raw.length < 100;
+      const text = blank ? '' : raw;
       const hash = crypto.createHash('sha256').update(text).digest('hex');
-      const changed = hash !== prev.hash;
-      pages[src.url] = { title: src.title, text, hash, checkedAt: Date.now(), changedAt: changed ? Date.now() : prev.changedAt, error: null };
-      console.log(`Web page check: ${src.url} — ${prev.hash ? (changed ? 'CHANGED' : 'no change') : 'first copy saved'}`);
+      if (prev.hash && hash !== prev.hash) changed++;
+      fresh[url] = { title: pinned.has(url) ? pinned.get(url).title : title || url, text, blank, hash, checkedAt: Date.now(), changedAt: hash !== prev.hash ? Date.now() : prev.changedAt, error: null };
     } catch (err) {
       // Keep the last good copy so answers keep working; just record the failure.
-      pages[src.url] = { ...prev, title: src.title, checkedAt: Date.now(), error: String(err.message || err) };
-      console.error(`Web page check failed: ${src.url} — ${err.message || err}`);
+      fresh[url] = { ...prev, title: prev.title || (pinned.get(url) || {}).title || url, checkedAt: Date.now(), error: String(err.message || err) };
+      failed.push(url);
     }
+    await sleep(500); // be polite to tucsonymca.org
   }
-  saveWebPages(pages);
+  saveWebPages(fresh);
+  const meta = loadWebReview();
+  meta.crawledAt = Date.now(); meta.pageCount = urls.length; meta.failed = failed;
+  saveWebReview(meta);
+  console.log(`Website check: ${urls.length} pages downloaded, ${changed} changed, ${failed.length} failed`);
+  if (review) await reviewWebsite(fresh);
 }
+
+// ---- weekly out-of-date review ----
+const REVIEW_SCHEMA = {
+  type: 'object',
+  properties: {
+    issues: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          quote: { type: 'string', description: 'The exact out-of-date text from the page' },
+          problem: { type: 'string', description: 'One sentence: what is wrong and why' },
+        },
+        required: ['quote', 'problem'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['issues'],
+  additionalProperties: false,
+};
+function arizonaToday() {
+  return new Date().toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+}
+async function reviewPage(url, page) {
+  const instructions =
+    `Today is ${arizonaToday()}. You are checking one page of the YMCA of Southern Arizona website (tucsonymca.org) for content that is out of date or contradicts itself, so the web team can fix it. ` +
+    'Flag only clear problems: dates, seasons, events or deadlines that have already passed but are presented as upcoming or current; registration windows that have closed but are presented as open; a past year presented as current; ' +
+    'the same fact stated two different ways on the page (for example two different prices or limits for the same thing); obvious placeholder or test content. ' +
+    "Do not flag evergreen content, writing style, typos, or anything you are not sure about. Quote the page's exact text. Return an empty list if nothing is clearly out of date.";
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL, max_tokens: 4096, system: instructions,
+      output_config: { format: { type: 'json_schema', schema: REVIEW_SCHEMA } },
+      messages: [{ role: 'user', content: `Page: ${page.title}\nURL: ${url}\n\n${page.text}` }],
+    }),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!r.ok) throw new Error('Anthropic HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200));
+  const data = await r.json();
+  if (data.stop_reason === 'refusal' || data.stop_reason === 'max_tokens') throw new Error('review stopped: ' + data.stop_reason);
+  const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
+  return JSON.parse(text).issues || [];
+}
+async function reviewWebsite(pages) {
+  if (DEMO_MODE) { console.log('Website review skipped (demo mode — no Anthropic key)'); return; }
+  const meta = loadWebReview();
+  const previouslySeen = new Set((meta.issues || []).flatMap((p) => p.items.map((i) => p.url + '|' + i.quote)));
+  const entries = Object.entries(pages).filter(([, p]) => p.text);
+  const results = [];
+  let reviewFailures = 0;
+  // Blank pages (skipping WordPress plugin archive pages like /etn-tags/).
+  for (const [url, p] of Object.entries(pages)) {
+    if (!p.blank || /\/etn[-_]/.test(url)) continue;
+    const quote = '(page has no content)';
+    results.push({ url, title: p.title, items: [{ quote, problem: 'This page loads but shows no text — it may be broken, unfinished, or should be removed.', isNew: !previouslySeen.has(url + '|' + quote) }] });
+  }
+  // A few pages at a time keeps a full review to a few minutes without hammering the API.
+  let next = 0;
+  await Promise.all([0, 1, 2].map(async () => {
+    while (next < entries.length) {
+      const [url, page] = entries[next++];
+      try {
+        const items = await reviewPage(url, page);
+        if (items.length) results.push({ url, title: page.title, items: items.map((i) => ({ ...i, isNew: !previouslySeen.has(url + '|' + i.quote) })) });
+      } catch (err) {
+        reviewFailures++;
+        console.error('Website review failed for', url, '—', err.message);
+      }
+    }
+  }));
+  results.sort((a, b) => a.title.localeCompare(b.title));
+  const total = results.reduce((n, p) => n + p.items.length, 0);
+  const newCount = results.reduce((n, p) => n + p.items.filter((i) => i.isNew).length, 0);
+  Object.assign(meta, { reviewedAt: Date.now(), issues: results, reviewFailures, emailed: false });
+  console.log(`Website review: ${total} possible out-of-date items on ${results.length} pages (${newCount} new), ${reviewFailures} pages couldn't be reviewed`);
+
+  if (total && RESEND_API_KEY) {
+    const html =
+      `<p>The Front Desk Concierge checked all ${entries.length} pages on tucsonymca.org (${arizonaToday()}) and found ${total} item${total === 1 ? '' : 's'} on ${results.length} page${results.length === 1 ? '' : 's'} that may be out of date${newCount ? ` (${newCount} new since last week)` : ''}.</p>` +
+      results.map((p) =>
+        `<h3 style="margin:18px 0 6px"><a href="${escapeHtml(p.url)}">${escapeHtml(p.title)}</a></h3><ul>` +
+        p.items.map((i) => `<li>${i.isNew ? '<strong>[NEW]</strong> ' : ''}"${escapeHtml(i.quote)}"<br><span style="color:#555">${escapeHtml(i.problem)}</span></li>`).join('') +
+        '</ul>').join('') +
+      '<p style="color:#666;font-size:12px">Found by an automated review, so double-check before changing anything. This list is also in the concierge at /admin.</p>';
+    try {
+      await sendEmailViaResend(SUPPORT_EMAIL, `Website check: ${total} item${total === 1 ? '' : 's'} may be out of date${newCount ? ` (${newCount} new)` : ''}`, html);
+      meta.emailed = true;
+    } catch { /* logged by sendEmailViaResend; still visible in /admin */ }
+  }
+  saveWebReview(meta);
+}
+
 // Monday in Arizona (no daylight saving, so a fixed offset is safe via Intl).
 function arizonaDay() {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Phoenix', weekday: 'short', year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', hour12: false }).formatToParts(new Date());
   const get = (t) => parts.find((p) => p.type === t).value;
   return { weekday: get('weekday'), date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) };
 }
-let lastMondayCheck = null;
 function scheduleWebChecks() {
   const pages = loadWebPages();
-  const missing = WEB_SOURCES.some((s) => !pages[s.url] || !pages[s.url].text);
-  const stale = WEB_SOURCES.some((s) => pages[s.url] && Date.now() - (pages[s.url].checkedAt || 0) > 7 * 24 * 3600 * 1000);
-  if (missing || stale) checkWebSources().catch((e) => console.error('Web page check error', e));
+  const meta = loadWebReview();
+  const missing = !meta.crawledAt || WEB_SOURCES.some((s) => !pages[s.url] || !pages[s.url].text);
+  const stale = Date.now() - (meta.crawledAt || 0) > 7 * 24 * 3600 * 1000;
+  if (missing || stale) checkWebSources();
   setInterval(() => {
     const az = arizonaDay();
-    if (az.weekday === 'Mon' && az.hour >= 6 && lastMondayCheck !== az.date) {
-      lastMondayCheck = az.date;
-      checkWebSources().catch((e) => console.error('Web page check error', e));
+    const m = loadWebReview();
+    // Remembered on disk so a restart on a Monday doesn't run (and email) twice.
+    if (az.weekday === 'Mon' && az.hour >= 6 && m.lastMondayRun !== az.date) {
+      m.lastMondayRun = az.date;
+      saveWebReview(m);
+      checkWebSources({ review: true });
     }
   }, 30 * 60 * 1000);
 }
@@ -399,6 +554,49 @@ function webPagesText() {
     return `### ${p.title} (from the Y website: ${s.url} — checked ${checked})\n${p.text}`;
   }).join('\n\n');
 }
+
+// ---- search across every saved tucsonymca.org page ----
+const SEARCH_STOPWORDS = new Set('the and for are you can how what when where who does our your with that this from have about there their any all ymca page'.split(' '));
+function searchWebsite(query) {
+  const pages = loadWebPages();
+  const pinned = new Set(WEB_SOURCES.map((s) => s.url));
+  const stems = [...new Set(String(query || '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 2 && !SEARCH_STOPWORDS.has(w)).map(wordStem))];
+  if (!stems.length) return { error: 'empty search' };
+  const scored = Object.entries(pages).filter(([url, p]) => p.text && !pinned.has(url)).map(([url, p]) => {
+    const text = p.text.toLowerCase(), title = (p.title || '').toLowerCase();
+    let score = 0, hits = 0;
+    for (const st of stems) {
+      const count = Math.min(10, text.split(st).length - 1);
+      if (count || title.includes(st) || url.includes(st)) hits++;
+      score += count + (title.includes(st) ? 8 : 0) + (url.includes(st) ? 5 : 0);
+    }
+    return { url, p, score: score * hits };
+  }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 4);
+  return {
+    results: scored.map(({ url, p }) => {
+      // The lines that mention the search words, plus a line of context on each side.
+      const lines = p.text.split('\n');
+      const keep = new Set();
+      lines.forEach((line, i) => { if (stems.some((st) => line.toLowerCase().includes(st))) [i - 1, i, i + 1, i + 2].forEach((j) => keep.add(j)); });
+      let excerpt = [...keep].filter((i) => i >= 0 && i < lines.length).sort((a, b) => a - b).map((i) => lines[i]).join('\n');
+      if (excerpt.length > 3500) excerpt = excerpt.slice(0, 3500) + '…';
+      return { title: p.title, url, excerpt };
+    }),
+    note: 'Pinned pages (tax credit, sports) are already in the knowledge base and are not repeated here.',
+  };
+}
+const WEBSITE_SEARCH_TOOL = {
+  name: 'search_website',
+  description:
+    'Searches every page of the YMCA of Southern Arizona website (tucsonymca.org), re-downloaded every Monday. ' +
+    'Returns the best-matching pages with their link and the relevant excerpts. Use short keyword queries, e.g. "family camp", "child care", "Holsclaw hours".',
+  input_schema: {
+    type: 'object',
+    properties: { query: { type: 'string', description: 'Keywords to look for' } },
+    required: ['query'],
+    additionalProperties: false,
+  },
+};
 
 // ---------- live program search (Daxko online registration) ----------
 // Uses the same public search the Daxko "Program Search" page runs in the browser (no login needed).
@@ -601,7 +799,7 @@ route('POST', '/api/chat', async (req, res) => {
   const instructions =
     'You are the Front Desk Concierge assistant for YMCA of Southern Arizona. ' +
     'Front-line staff are asking you questions while a member is at the counter, so answer briefly and plainly, leading with the direct answer. ' +
-    "Only use the knowledge base below. If the answer isn't in it, say clearly that it isn't in the saved knowledge base yet and suggest checking with a supervisor — never guess at hours, prices, or policy. " +
+    "Only use the knowledge base below and your search tools. If the knowledge base doesn't cover a question, use search_website to look across the whole tucsonymca.org site before giving up, and include the page link when you use it. If neither has the answer, say clearly that it isn't in the saved knowledge base or on the website, and suggest using Ask Support — never guess at hours, prices, or policy. " +
     "Some entries are marked '(flyer attached)' — if one of those is relevant, mention that a flyer is available so staff know to show or print it. " +
     "Entries marked '(from the Y website …)' are the current text of a tucsonymca.org page, re-checked weekly; when you use one, include that page's link so staff can share it. " +
     "If a website page contradicts itself or a saved answer (for example two different dollar amounts), say so plainly and give both figures rather than picking one. " +
@@ -677,15 +875,22 @@ route('PUT', '/api/admin/questions/:id', async (req, res, params) => {
 route('GET', '/api/admin/web-pages', async (req, res) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
   const pages = loadWebPages();
-  sendJson(res, 200, WEB_SOURCES.map((s) => {
-    const p = pages[s.url] || {};
-    return { url: s.url, title: s.title, checkedAt: p.checkedAt || null, changedAt: p.changedAt || null, error: p.error || null, chars: p.text ? p.text.length : 0 };
-  }));
+  const meta = loadWebReview();
+  sendJson(res, 200, {
+    running: !!webCheckRunning,
+    crawledAt: meta.crawledAt || null, pageCount: meta.pageCount || 0, failed: meta.failed || [],
+    reviewedAt: meta.reviewedAt || null, reviewFailures: meta.reviewFailures || 0, emailed: !!meta.emailed, issues: meta.issues || [],
+    pinned: WEB_SOURCES.map((s) => {
+      const p = pages[s.url] || {};
+      return { url: s.url, title: s.title, checkedAt: p.checkedAt || null, changedAt: p.changedAt || null, error: p.error || null };
+    }),
+  });
 });
+// Starts a full download + out-of-date review in the background (takes a few minutes).
 route('POST', '/api/admin/web-pages/check', async (req, res) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
-  await checkWebSources();
-  sendJson(res, 200, { ok: true });
+  checkWebSources({ review: true });
+  sendJson(res, 200, { ok: true, started: true });
 });
 
 route('GET', '/api/admin/kb', async (req, res) => {
