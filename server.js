@@ -60,6 +60,9 @@ const SEED_UPLOADS_DIR = path.join(__dirname, 'seed', 'uploads');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const STAFF_PASSCODE = process.env.STAFF_PASSCODE || '';
+// The staff chat is open to anyone with the link (no passcode). Set REQUIRE_STAFF_PASSCODE=true to bring
+// the passcode page back. /admin always needs ADMIN_PASSWORD.
+const REQUIRE_STAFF_PASSCODE = process.env.REQUIRE_STAFF_PASSCODE === 'true';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
@@ -72,7 +75,7 @@ const EMAIL_FROM = process.env.EMAIL_FROM || 'Front Desk Concierge <onboarding@r
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@tucsonymca.org';
 
 if (!SESSION_SECRET) console.warn('WARNING: SESSION_SECRET is not set. Login cookies will use an insecure fallback key. Set SESSION_SECRET before going live.');
-if (!STAFF_PASSCODE) console.warn('WARNING: STAFF_PASSCODE is not set — the staff gate will reject everyone until it is.');
+if (REQUIRE_STAFF_PASSCODE && !STAFF_PASSCODE) console.warn('WARNING: STAFF_PASSCODE is not set — the staff gate will reject everyone until it is.');
 if (!ADMIN_PASSWORD) console.warn('WARNING: ADMIN_PASSWORD is not set — /admin will reject everyone until it is.');
 if (!RESEND_API_KEY) console.warn('NOTE: RESEND_API_KEY is not set — staff questions will be saved to /admin but not emailed to ' + SUPPORT_EMAIL + '.');
 if (DEMO_MODE) console.warn('DEMO MODE: no ANTHROPIC_API_KEY set — chat answers will be canned placeholders, not real Claude responses.');
@@ -293,7 +296,7 @@ function sendFile(res, filePath, status) {
 }
 
 // ---------- auth ----------
-function isStaff(req) { const c = parseCookies(req); return verifyCookie(c.fdc_staff, 'staff'); }
+function isStaff(req) { if (!REQUIRE_STAFF_PASSCODE) return true; const c = parseCookies(req); return verifyCookie(c.fdc_staff, 'staff'); }
 function isAdmin(req) { const c = parseCookies(req); return verifyCookie(c.fdc_admin, 'admin'); }
 
 // ---------- chat helpers ----------
@@ -944,8 +947,9 @@ route('POST', '/api/logout', async (req, res) => {
 
 route('GET', '/api/health', async (req, res) => sendJson(res, 200, { ok: true, demoMode: DEMO_MODE }));
 
-route('POST', '/api/chat', async (req, res) => {
+route('POST', '/api/chat', async (req, res, params, ip) => {
   if (!isStaff(req) && !isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  if (!isAdmin(req) && rateLimited(ip, 'chat', 60)) return sendJson(res, 429, { error: 'rate_limited' });
   const body = await readJsonBody(req, 20000).catch(() => null);
   if (!body || !body.question || typeof body.question !== 'string' || !body.question.trim()) {
     return sendJson(res, 400, { error: 'missing_question' });
@@ -1239,6 +1243,7 @@ route('GET', '/app.js', async (req, res) => sendFile(res, path.join(PUBLIC_DIR, 
 route('GET', '/admin.js', async (req, res) => sendFile(res, path.join(PUBLIC_DIR, 'admin.js')));
 
 const server = http.createServer(async (req, res) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow'); // staff tool — keep it out of search engines
   const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const pathname = decodeURIComponent(url.pathname);

@@ -179,13 +179,15 @@
       body: JSON.stringify({ question: question, history: history })
     }).then(function(r){
       if(r.status === 401){ window.location.href = '/'; return null; }
-      return r.json().then(function(data){ return { ok: r.ok, data: data }; });
+      return r.json().then(function(data){ return { ok: r.ok, status: r.status, data: data }; });
     }).then(function(res){
       if(!res) return;
       els.send.disabled = false;
       if(!res.ok){
         bubble.classList.remove('pending');
-        bubble.textContent = "Sorry — something went wrong answering that. Try again in a moment.";
+        bubble.textContent = res.status === 429
+          ? "You've asked a lot of questions in the last few minutes — please wait about 15 minutes and try again."
+          : "Sorry — something went wrong answering that. Try again in a moment.";
         if(bubble.parentElement) addSupportLink(bubble.parentElement, question);
         return;
       }
