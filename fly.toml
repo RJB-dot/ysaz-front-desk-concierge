@@ -1,7 +1,7 @@
 # Edit `app` below to a name that's unique across all of Fly.io before deploying
 # (e.g. "ysaz-front-desk-concierge"). See README.md for the full deploy walkthrough.
-app = "CHANGE-ME-front-desk-concierge"
-primary_region = "phx"  # Phoenix — closest Fly.io region to Tucson. Change if you prefer another.
+app = "ysaz-front-desk-concierge"
+primary_region = "lax"  # Los Angeles. The volume (fdc_data) lives here too, so keep them in the same region.
 
 [build]
 
