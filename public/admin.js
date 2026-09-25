@@ -17,6 +17,10 @@
     qHint: document.getElementById('q-hint'),
     webList: document.getElementById('web-list'),
     webCheckNow: document.getElementById('web-check-now'),
+    annList: document.getElementById('ann-list'),
+    annCount: document.getElementById('ann-count'),
+    copyScript: document.getElementById('copy-script'),
+    copyStatus: document.getElementById('copy-status'),
   };
   var editingId = null;
   var editingEntry = null;
@@ -267,6 +271,51 @@
     fetch('/api/admin/web-pages/check', { method:'POST' }).then(function(){ setTimeout(loadWebPages, 1500); });
   });
 
+  // ---------- announcements from the concierge@ mailbox ----------
+  function loadAnnouncements(){
+    fetch('/api/admin/announcements').then(function(r){ return r.json(); }).then(function(d){
+      var live = d.entries.filter(function(a){ return a.status === 'live' && a.active; });
+      els.annCount.textContent = live.length;
+      if(!d.entries.length){
+        els.annList.innerHTML = '<div class="empty">' + (d.emailsReceived ? 'Emails received, but none had announcements in them.' : 'No emails received yet — set up the Gmail connection below.') + '</div>';
+        return;
+      }
+      els.annList.innerHTML = '';
+      d.entries.forEach(function(a){
+        var item = document.createElement('div');
+        item.className = 'kb-item q-item' + (a.active ? '' : ' handled');
+        var when = a.starts ? (a.ends && a.ends !== a.starts ? a.starts + ' to ' + a.ends : a.starts) : 'no date';
+        var status = a.status === 'pending' ? '<span class="q-warn">Waiting for approval</span>' : (a.active ? 'Live' : 'Expired');
+        item.innerHTML =
+          '<div class="row"><div class="ttl">'+escapeHtml(a.title)+'</div><div class="kb-actions">' +
+            (a.status === 'pending' ? '<button data-act="approve">Approve</button>' : '') +
+            '<button data-act="del">Remove</button></div></div>' +
+          '<div class="q-meta"><span class="q-topic">'+escapeHtml(a.category)+'</span> · ' + escapeHtml(a.branches.join(', ') || 'All branches') + ' · ' + escapeHtml(when) + ' · ' + status + '</div>' +
+          '<div class="body">'+linkify(a.details)+'</div>' +
+          '<div class="q-meta">From “'+escapeHtml(a.subject)+'” — '+escapeHtml(a.from)+' · '+fmtDate(a.receivedAt)+'</div>';
+        var approve = item.querySelector('[data-act="approve"]');
+        approve && approve.addEventListener('click', function(){
+          fetch('/api/admin/announcements/'+a.id, { method:'PUT' }).then(loadAnnouncements);
+        });
+        item.querySelector('[data-act="del"]').addEventListener('click', function(){
+          if(!confirm('Remove "'+a.title+'"? The concierge will stop using it.')) return;
+          fetch('/api/admin/announcements/'+a.id, { method:'DELETE' }).then(loadAnnouncements);
+        });
+        els.annList.appendChild(item);
+      });
+    }).catch(function(){ els.annList.innerHTML = '<div class="empty">Couldn\'t load announcements.</div>'; });
+  }
+  els.copyScript.addEventListener('click', function(){
+    fetch('/api/admin/email-setup').then(function(r){ return r.json(); }).then(function(d){
+      return navigator.clipboard.writeText(d.script);
+    }).then(function(){
+      els.copyStatus.textContent = 'Copied — paste it into the script editor.'; els.copyStatus.className = 'status-msg ok';
+    }).catch(function(){
+      els.copyStatus.textContent = "Couldn't copy automatically — try again, or use a different browser."; els.copyStatus.className = 'status-msg err';
+    });
+  });
+
+  loadAnnouncements();
   loadList();
   loadQuestions();
   loadWebPages();

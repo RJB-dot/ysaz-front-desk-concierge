@@ -24,6 +24,25 @@
     <div id="q-list"></div>
   </div>
 
+  <div class="panel" id="ann-panel">
+    <h2>Announcements from email (<span id="ann-count">0</span> live)</h2>
+    <p class="q-hint">Emails sent or forwarded to concierge@tucsonymca.org become announcements the concierge uses until they expire. Emails from @tucsonymca.org go live right away; others wait for approval here.</p>
+    <div id="ann-list"></div>
+    <details id="ann-setup">
+      <summary>Gmail connection setup</summary>
+      <ol class="setup-steps">
+        <li>Sign in to Gmail as <strong>concierge@tucsonymca.org</strong> (use a private/incognito window so you don't mix it up with your own account).</li>
+        <li>In that same window, go to <a href="https://script.google.com" target="_blank" rel="noopener">script.google.com</a> → <strong>New project</strong>.</li>
+        <li>Delete what's there, click <strong>Copy script</strong> below, and paste it in. Click the 💾 save icon.</li>
+        <li>In the function dropdown at the top pick <strong>setup</strong>, then click <strong>Run</strong>. Approve the permissions Google asks for (choose the concierge account; if it says "Google hasn't verified this app", click Advanced → Go to project).</li>
+        <li>Done — it now checks the mailbox every 5 minutes. New emails show up in the list above.</li>
+      </ol>
+      <button class="btn" id="copy-script" type="button">Copy script</button>
+      <span class="status-msg" id="copy-status"></span>
+      <p class="q-hint" style="margin-top:10px">The script contains a private key that lets it send emails to the concierge — keep it in that Google account only.</p>
+    </details>
+  </div>
+
   <div class="panel" id="web-panel">
     <div class="row-head">
       <h2>Website (all tucsonymca.org pages, checked every Monday)</h2>

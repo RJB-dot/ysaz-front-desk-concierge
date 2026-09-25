@@ -35,6 +35,12 @@ const KB_FILE = path.join(DATA_DIR, 'kb.json');
 const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
 const WEB_PAGES_FILE = path.join(DATA_DIR, 'web-pages.json');
 const WEB_REVIEW_FILE = path.join(DATA_DIR, 'web-review.json');
+const ANNOUNCEMENTS_FILE = path.join(DATA_DIR, 'announcements.json');
+const INBOUND_SECRET_FILE = path.join(DATA_DIR, 'inbound-secret.txt');
+// Public URL of this app, used in the Gmail setup script shown in /admin.
+const PUBLIC_URL = process.env.PUBLIC_URL || 'https://ysaz-front-desk-concierge.fly.dev';
+// Emails from these domains become live announcements right away; anything else waits for approval in /admin.
+const TRUSTED_EMAIL_DOMAINS = ['tucsonymca.org'];
 
 // Every page in the tucsonymca.org page sitemap is downloaded every Monday morning (Arizona time) and
 // searchable by the concierge; Claude then reviews each page for out-of-date content and emails
@@ -161,6 +167,13 @@ function loadWebPages() {
 function saveWebPages(p) {
   fs.writeFileSync(WEB_PAGES_FILE, JSON.stringify(p, null, 2));
 }
+function loadAnnouncements() {
+  if (!fs.existsSync(ANNOUNCEMENTS_FILE)) return { entries: [], emailIds: [] };
+  return JSON.parse(fs.readFileSync(ANNOUNCEMENTS_FILE, 'utf8'));
+}
+function saveAnnouncements(a) {
+  fs.writeFileSync(ANNOUNCEMENTS_FILE, JSON.stringify(a, null, 2));
+}
 function loadKb() {
   return JSON.parse(fs.readFileSync(KB_FILE, 'utf8'));
 }
@@ -171,6 +184,12 @@ function newId() {
   return crypto.randomBytes(9).toString('hex');
 }
 ensureDataFiles();
+// Shared secret the Gmail script sends with each email. Generated once and kept on the volume, so it
+// never has to be typed anywhere — admins copy the ready-made script from /admin.
+const INBOUND_SECRET = process.env.INBOUND_SECRET || (() => {
+  if (!fs.existsSync(INBOUND_SECRET_FILE)) fs.writeFileSync(INBOUND_SECRET_FILE, crypto.randomBytes(24).toString('hex'));
+  return fs.readFileSync(INBOUND_SECRET_FILE, 'utf8').trim();
+})();
 
 // ---------- request helpers ----------
 function sendJson(res, status, obj) {
@@ -598,6 +617,110 @@ const WEBSITE_SEARCH_TOOL = {
   },
 };
 
+// ---------- announcements from email (special events, closures, schedule changes) ----------
+// A Google Apps Script in the concierge@tucsonymca.org mailbox posts each new email to /api/inbound-email.
+// Claude pulls out anything staff should know, saved as announcements that the concierge uses until they expire.
+const ANNOUNCEMENT_SCHEMA = {
+  type: 'object',
+  properties: {
+    announcements: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', description: 'Short title, e.g. "Boo at the Pool movie night"' },
+          category: { type: 'string', enum: ['event', 'closure', 'schedule change', 'program', 'policy', 'other'] },
+          branches: { type: 'array', items: { type: 'string' }, description: 'Branches it applies to, e.g. ["Northwest YMCA"]; empty if all or unknown' },
+          starts: { anyOf: [{ type: 'string' }, { type: 'null' }], description: 'YYYY-MM-DD the event/closure starts, or null' },
+          ends: { anyOf: [{ type: 'string' }, { type: 'null' }], description: 'YYYY-MM-DD it ends (same as starts for one day), or null if ongoing/unknown' },
+          details: { type: 'string', description: 'Everything front desk staff need: what, when (times), where, who it is for, cost, how to sign up, who to contact' },
+        },
+        required: ['title', 'category', 'branches', 'starts', 'ends', 'details'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['announcements'],
+  additionalProperties: false,
+};
+async function extractAnnouncements(email) {
+  const instructions =
+    `Today is ${arizonaToday()}. You read emails sent or forwarded to the YMCA of Southern Arizona Front Desk Concierge and pull out information front desk staff should know when members ask: special events, facility or amenity closures, schedule or hours changes, new or changed programs, policy updates. ` +
+    'Use the email date to resolve relative dates ("this Saturday"). Ignore signatures, disclaimers, and forwarding headers. Branch names: Lighthouse City, Lohse Family, Ott Family, Northwest (Pima County Community Center), Jacobs City, Mulcahy City, Holsclaw, Triangle Y Camp. ' +
+    'Only include facts stated in the email. Return an empty list if the email has nothing staff would need to tell members (e.g. a thank-you note or an internal-only reply).';
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL, max_tokens: 4096, system: instructions,
+      output_config: { format: { type: 'json_schema', schema: ANNOUNCEMENT_SCHEMA } },
+      messages: [{ role: 'user', content: `From: ${email.from}\nDate: ${email.date}\nSubject: ${email.subject}\n\n${email.body}` }],
+    }),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!r.ok) throw new Error('Anthropic HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200));
+  const data = await r.json();
+  if (data.stop_reason === 'refusal' || data.stop_reason === 'max_tokens') throw new Error('extraction stopped: ' + data.stop_reason);
+  return JSON.parse((data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')).announcements || [];
+}
+function arizonaISODate(ms) {
+  return new Date(ms).toLocaleDateString('en-CA', { timeZone: 'America/Phoenix' }); // YYYY-MM-DD
+}
+// Live until the day after it ends; with no end date, until 60 days after the email arrived.
+function announcementActive(a) {
+  const today = arizonaISODate(Date.now());
+  if (a.ends) return a.ends >= today;
+  if (a.starts && a.starts >= today) return true;
+  return Date.now() - a.receivedAt < 60 * 24 * 3600 * 1000;
+}
+function announcementsText() {
+  const live = loadAnnouncements().entries.filter((a) => a.status === 'live' && announcementActive(a));
+  if (!live.length) return '';
+  return live.map((a) => {
+    const when = a.starts ? (a.ends && a.ends !== a.starts ? `${a.starts} to ${a.ends}` : a.starts) : 'no specific date';
+    const received = new Date(a.receivedAt).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', month: 'short', day: 'numeric' });
+    return `### ${a.title} (${a.category}; ${a.branches.length ? a.branches.join(', ') : 'all/unspecified branches'}; ${when}) — from an email received ${received}\n${a.details}`;
+  }).join('\n\n');
+}
+function gmailScript() {
+  return `// Front Desk Concierge — sends new emails in this mailbox to the concierge every 5 minutes.
+// Paste into script.google.com while signed in as concierge@tucsonymca.org, then run "setup" once.
+const CONCIERGE_URL = '${PUBLIC_URL}/api/inbound-email';
+const SECRET = '${INBOUND_SECRET}';
+const DONE_LABEL = 'Concierge Processed';
+
+function setup() {
+  ScriptApp.getProjectTriggers().forEach((t) => ScriptApp.deleteTrigger(t));
+  ScriptApp.newTrigger('sendNewEmails').timeBased().everyMinutes(5).create();
+  sendNewEmails();
+}
+
+function sendNewEmails() {
+  const done = GmailApp.getUserLabelByName(DONE_LABEL) || GmailApp.createLabel(DONE_LABEL);
+  const threads = GmailApp.search('in:inbox -label:concierge-processed newer_than:30d', 0, 20);
+  for (const thread of threads) {
+    for (const msg of thread.getMessages()) {
+      const res = UrlFetchApp.fetch(CONCIERGE_URL, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { 'x-concierge-secret': SECRET },
+        payload: JSON.stringify({
+          messageId: msg.getId(), from: msg.getFrom(), subject: msg.getSubject(),
+          date: msg.getDate().toISOString(), body: msg.getPlainBody().slice(0, 100000),
+        }),
+        muteHttpExceptions: true,
+      });
+      if (res.getResponseCode() !== 200) {
+        console.log('Concierge did not accept "' + msg.getSubject() + '": ' + res.getResponseCode() + ' ' + res.getContentText());
+        return; // try again on the next run
+      }
+    }
+    thread.addLabel(done);
+  }
+}
+`;
+}
+
 // ---------- live program search (Daxko online registration) ----------
 // Uses the same public search the Daxko "Program Search" page runs in the browser (no login needed).
 // Daxko matches ANY word in the keywords, so every search is expanded into variants (e.g. "volleyball",
@@ -806,7 +929,9 @@ route('POST', '/api/chat', async (req, res) => {
     "For ANY sports question (leagues, clinics, basketball, volleyball, soccer, adult sports, coaching), use the tucsonymca.org sports pages below as the main source — the Youth Sports Leagues page's 'Upcoming Season Information' section has the next seasons (dates, grades, registration windows, fees). Also run search_daxko_programs to see if sessions are open right now; if Daxko shows none, answer from the sports pages (e.g. when the next season and its registration open) instead of just saying nothing is available. " +
     "When staff ask what programs, classes, lessons, leagues or sessions are offered (or when/where one is), use the search_daxko_programs tool — that's the live registration system — and list the matching sessions: program, branch, dates, days/times, and the registration link. Group them by program and branch so they're easy to scan. " +
     "If the search finds nothing, say nothing is currently open for online registration in Daxko and point to the right department contact from the knowledge base. Don't list sessions that don't match what was asked.\n\n" +
-    `=== KNOWLEDGE BASE ===\n${kbText(kb)}${webPagesText() ? '\n\n' + webPagesText() : ''}\n=== END KNOWLEDGE BASE ===`;
+    "Entries under ANNOUNCEMENTS come from recent staff and member emails (events, closures, schedule changes); they are newer than the website, so prefer them when they conflict, and mention the date.\n\n" +
+    `=== KNOWLEDGE BASE ===\n${kbText(kb)}${webPagesText() ? '\n\n' + webPagesText() : ''}\n=== END KNOWLEDGE BASE ===` +
+    (announcementsText() ? `\n\n=== ANNOUNCEMENTS (from emails) ===\n${announcementsText()}\n=== END ANNOUNCEMENTS ===` : '');
   const messages = [];
   if (Array.isArray(body.history)) {
     for (const h of body.history.slice(-12)) {
@@ -891,6 +1016,60 @@ route('POST', '/api/admin/web-pages/check', async (req, res) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
   checkWebSources({ review: true });
   sendJson(res, 200, { ok: true, started: true });
+});
+
+// Called by the Gmail Apps Script (see gmailScript()) for each new email in the concierge mailbox.
+route('POST', '/api/inbound-email', async (req, res) => {
+  const given = String(req.headers['x-concierge-secret'] || '');
+  const ok = given.length === INBOUND_SECRET.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(INBOUND_SECRET));
+  if (!ok) return sendJson(res, 401, { error: 'bad_secret' });
+  const body = await readJsonBody(req, 400000).catch(() => null);
+  if (!body || !body.messageId || typeof body.body !== 'string') return sendJson(res, 400, { error: 'missing_fields' });
+  const store = loadAnnouncements();
+  if (store.emailIds.includes(body.messageId)) return sendJson(res, 200, { ok: true, duplicate: true });
+  if (DEMO_MODE) return sendJson(res, 503, { error: 'demo_mode' });
+  const email = { from: String(body.from || ''), subject: String(body.subject || ''), date: String(body.date || ''), body: body.body.slice(0, 100000) };
+  let found;
+  try { found = await extractAnnouncements(email); } catch (err) {
+    console.error('Announcement extraction failed', err.message);
+    return sendJson(res, 502, { error: 'extraction_failed' }); // the script retries on its next run
+  }
+  const address = (email.from.match(/<([^>]+)>/) || [, email.from])[1].trim().toLowerCase();
+  const trusted = TRUSTED_EMAIL_DOMAINS.some((d) => address.endsWith('@' + d));
+  const fresh = loadAnnouncements(); // re-read: another email may have been saved meanwhile
+  for (const a of found) {
+    fresh.entries.push({ id: newId(), ...a, status: trusted ? 'live' : 'pending', from: email.from, subject: email.subject, emailId: body.messageId, receivedAt: Date.now() });
+  }
+  fresh.emailIds.push(body.messageId);
+  saveAnnouncements(fresh);
+  console.log(`Inbound email "${email.subject}" from ${address}: ${found.length} announcement(s), ${trusted ? 'live' : 'awaiting approval'}`);
+  sendJson(res, 200, { ok: true, announcements: found.length });
+});
+route('GET', '/api/admin/announcements', async (req, res) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const entries = loadAnnouncements().entries.map((a) => ({ ...a, active: announcementActive(a) }))
+    .sort((a, b) => (a.status === 'pending' ? -1 : 0) - (b.status === 'pending' ? -1 : 0) || b.receivedAt - a.receivedAt);
+  sendJson(res, 200, { entries, emailsReceived: loadAnnouncements().emailIds.length });
+});
+route('GET', '/api/admin/email-setup', async (req, res) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  sendJson(res, 200, { script: gmailScript() });
+});
+route('PUT', '/api/admin/announcements/:id', async (req, res, params) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const store = loadAnnouncements();
+  const a = store.entries.find((e) => e.id === params.id);
+  if (!a) return sendJson(res, 404, { error: 'not_found' });
+  a.status = 'live';
+  saveAnnouncements(store);
+  sendJson(res, 200, a);
+});
+route('DELETE', '/api/admin/announcements/:id', async (req, res, params) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const store = loadAnnouncements();
+  store.entries = store.entries.filter((e) => e.id !== params.id);
+  saveAnnouncements(store);
+  sendJson(res, 200, { ok: true });
 });
 
 route('GET', '/api/admin/kb', async (req, res) => {
