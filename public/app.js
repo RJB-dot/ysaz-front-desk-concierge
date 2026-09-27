@@ -207,6 +207,23 @@
     });
   });
 
+  // "Common questions" in the sidebar — click one to ask it.
+  fetch('/api/faq').then(function(r){ return r.ok ? r.json() : null; }).then(function(d){
+    if(!d || !d.questions || !d.questions.length) return;
+    var list = document.getElementById('faq-list');
+    d.questions.forEach(function(q){
+      var b = document.createElement('button');
+      b.type = 'button'; b.className = 'faq-q'; b.textContent = q;
+      b.addEventListener('click', function(){
+        els.rail.classList.remove('open'); els.scrim.hidden = true;
+        els.q.value = q; autoGrow();
+        els.composer.requestSubmit();
+      });
+      list.appendChild(b);
+    });
+    document.getElementById('faq').hidden = false;
+  }).catch(function(){});
+
   fetch('/api/health').then(function(r){ return r.json(); }).then(function(d){
     if(d && d.demoMode){
       var slot = document.getElementById('demo-banner-slot');

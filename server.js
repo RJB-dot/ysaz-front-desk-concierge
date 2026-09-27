@@ -36,6 +36,8 @@ const QUESTIONS_FILE = path.join(DATA_DIR, 'questions.json');
 const WEB_PAGES_FILE = path.join(DATA_DIR, 'web-pages.json');
 const WEB_REVIEW_FILE = path.join(DATA_DIR, 'web-review.json');
 const ANNOUNCEMENTS_FILE = path.join(DATA_DIR, 'announcements.json');
+const QUESTION_LOG_FILE = path.join(DATA_DIR, 'question-log.json');
+const FAQ_FILE = path.join(DATA_DIR, 'faq.json');
 const INBOUND_SECRET_FILE = path.join(DATA_DIR, 'inbound-secret.txt');
 // Public URL of this app, used in the Gmail setup script shown in /admin.
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://ysaz-front-desk-concierge.fly.dev';
@@ -822,6 +824,81 @@ function sendNewEmails() {
 `;
 }
 
+// ---------- "Common questions" in the chat sidebar ----------
+// Questions staff type are kept for 30 days. Each morning Claude turns them into the 8 most common questions
+// (reworded, no names or account details), shown in the sidebar. Until there are enough, starter samples fill in.
+const STARTER_FAQ = [
+  'What are the hours at each branch this weekend?',
+  'How does the Bank Draft Discount work?',
+  'How do I sell a gift card?',
+  'What swim lessons are available for a 5-year-old?',
+  'When does the next youth basketball season start?',
+  'How does a member cancel their membership?',
+  'How does a member redeem a YMCA360 App reward?',
+  'How can a member apply for financial assistance?',
+];
+const FAQ_SIZE = 8;
+const FAQ_MIN_QUESTIONS = 15; // below this, it's still mostly starter samples
+function loadQuestionLog() {
+  if (!fs.existsSync(QUESTION_LOG_FILE)) return [];
+  return JSON.parse(fs.readFileSync(QUESTION_LOG_FILE, 'utf8'));
+}
+function logQuestion(question) {
+  const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+  const log = loadQuestionLog().filter((q) => q.at > cutoff).slice(-5000);
+  log.push({ q: question.slice(0, 300), at: Date.now() });
+  fs.writeFileSync(QUESTION_LOG_FILE, JSON.stringify(log));
+}
+function loadFaq() {
+  if (!fs.existsSync(FAQ_FILE)) return { updatedAt: null, source: 'starter', questions: STARTER_FAQ };
+  return JSON.parse(fs.readFileSync(FAQ_FILE, 'utf8'));
+}
+const FAQ_SCHEMA = {
+  type: 'object',
+  properties: { questions: { type: 'array', items: { type: 'string' } } },
+  required: ['questions'],
+  additionalProperties: false,
+};
+async function refreshFaq() {
+  const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+  const recent = loadQuestionLog().filter((q) => q.at > cutoff).map((q) => q.q);
+  let common = [];
+  if (recent.length >= FAQ_MIN_QUESTIONS && !DEMO_MODE) {
+    const instructions =
+      `Below are questions YMCA of Southern Arizona front desk staff typed into their help tool over the last 30 days. ` +
+      `Pick the ${FAQ_SIZE} topics asked about MOST OFTEN and write each as one short, clear, general question (under 70 characters), most common first. ` +
+      'Merge questions that mean the same thing. Never include names, phone numbers, emails, member/account numbers or other personal details — make every question general. Skip greetings, tests and nonsense.';
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: ANTHROPIC_MODEL, max_tokens: 2048, system: instructions,
+        output_config: { format: { type: 'json_schema', schema: FAQ_SCHEMA } },
+        messages: [{ role: 'user', content: recent.slice(-1500).map((q) => '- ' + q.replace(/\s+/g, ' ')).join('\n') }],
+      }),
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!r.ok) throw new Error('Anthropic HTTP ' + r.status);
+    const data = await r.json();
+    if (data.stop_reason === 'end_turn') {
+      common = (JSON.parse((data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')).questions || [])
+        .map((q) => String(q).trim()).filter(Boolean).slice(0, FAQ_SIZE);
+    }
+  }
+  // Top up with starter samples so the list is always full.
+  const questions = [...common, ...STARTER_FAQ.filter((s) => !common.some((c) => c.toLowerCase() === s.toLowerCase()))].slice(0, FAQ_SIZE);
+  fs.writeFileSync(FAQ_FILE, JSON.stringify({ updatedAt: Date.now(), day: arizonaISODate(Date.now()), source: common.length ? 'usage' : 'starter', basedOn: recent.length, questions }, null, 2));
+  console.log(`Common questions refreshed: ${common.length} from ${recent.length} recent questions, ${questions.length - common.length} starter samples`);
+}
+function scheduleFaqRefresh() {
+  const tick = () => {
+    const az = arizonaDay();
+    if (loadFaq().day !== az.date && az.hour >= 3) refreshFaq().catch((e) => console.error('Common questions refresh failed', e.message));
+  };
+  tick();
+  setInterval(tick, 30 * 60 * 1000);
+}
+
 // ---------- live program search (Daxko online registration) ----------
 // Uses the same public search the Daxko "Program Search" page runs in the browser (no login needed).
 // Daxko matches ANY word in the keywords, so every search is expanded into variants (e.g. "volleyball",
@@ -1011,6 +1088,7 @@ route('POST', '/api/chat', async (req, res, params, ip) => {
   if (!body || !body.question || typeof body.question !== 'string' || !body.question.trim()) {
     return sendJson(res, 400, { error: 'missing_question' });
   }
+  try { logQuestion(body.question.trim()); } catch (e) { console.error('Could not log question', e.message); }
   const kb = loadKb();
   const flyers = findRelatedFlyers(kb, body.question).map((e) => ({ id: e.id, title: e.title, filename: e.attachment.filename, url: `/uploads/${e.attachment.path}` }));
 
@@ -1215,6 +1293,12 @@ route('DELETE', '/api/admin/announcements/:id', async (req, res, params) => {
   sendJson(res, 200, { ok: true });
 });
 
+route('GET', '/api/faq', async (req, res) => {
+  if (!isStaff(req) && !isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const faq = loadFaq();
+  sendJson(res, 200, { questions: faq.questions, source: faq.source });
+});
+
 route('GET', '/api/admin/kb', async (req, res) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
   const kb = loadKb();
@@ -1325,6 +1409,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 scheduleWebChecks();
+scheduleFaqRefresh();
 
 server.listen(PORT, () => {
   console.log(`Front Desk Concierge listening on :${PORT}${DEMO_MODE ? ' (DEMO MODE)' : ''}`);
