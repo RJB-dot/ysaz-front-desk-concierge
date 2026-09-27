@@ -43,6 +43,8 @@ const INBOUND_SECRET_FILE = path.join(DATA_DIR, 'inbound-secret.txt');
 const PUBLIC_URL = process.env.PUBLIC_URL || 'https://ysaz-front-desk-concierge.fly.dev';
 // Emails from these domains become live announcements right away; anything else waits for approval in /admin.
 const TRUSTED_EMAIL_DOMAINS = ['tucsonymca.org'];
+// Who gets the Monday usage report (sent by the concierge@ Gmail script).
+const REPORT_TO = process.env.REPORT_TO || 'rjb@tucsonymca.org';
 
 // Every page in the tucsonymca.org page sitemap is downloaded every Monday morning (Arizona time) and
 // searchable by the concierge; Claude then reviews each page for out-of-date content and emails
@@ -369,7 +371,8 @@ function findRelatedFlyers(kb, question) {
   return currentKbEntries(kb).filter((e) => hasCurrentFlyer(e) && words.some((w) => e.title.toLowerCase().includes(w)));
 }
 // Runs the conversation, letting Claude call the program-search tool (a few rounds at most) before answering.
-async function callAnthropic(instructions, messages) {
+async function callAnthropic(instructions, messages, stats = {}) {
+  stats.inTok = stats.inTok || 0; stats.outTok = stats.outTok || 0; stats.tools = stats.tools || [];
   const convo = messages.slice();
   for (let round = 0; round < 4; round++) {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -383,7 +386,11 @@ async function callAnthropic(instructions, messages) {
       throw new Error('upstream_error');
     }
     const data = await r.json();
+    const u = data.usage || {};
+    stats.inTok += (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+    stats.outTok += u.output_tokens || 0;
     const content = data.content || [];
+    content.filter((b) => b.type === 'tool_use').forEach((b) => stats.tools.push(b.name));
     if (data.stop_reason !== 'tool_use') {
       return content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
     }
@@ -790,7 +797,19 @@ const DONE_LABEL = 'Concierge Processed';
 function setup() {
   ScriptApp.getProjectTriggers().forEach((t) => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('sendNewEmails').timeBased().everyMinutes(5).create();
+  // Weekly usage report, Monday 7-8am (script time zone: Project Settings; should be Arizona).
+  ScriptApp.newTrigger('sendWeeklyReport').timeBased().onWeekDay(ScriptApp.WeekDay.MONDAY).atHour(7).create();
   sendNewEmails();
+}
+
+function sendWeeklyReport() {
+  const res = UrlFetchApp.fetch('${PUBLIC_URL}/api/usage-report', { headers: { 'x-concierge-secret': SECRET }, muteHttpExceptions: true });
+  if (res.getResponseCode() !== 200) {
+    console.log('Usage report failed: ' + res.getResponseCode() + ' ' + res.getContentText());
+    return;
+  }
+  const report = JSON.parse(res.getContentText());
+  MailApp.sendEmail({ to: report.to, subject: report.subject, htmlBody: report.html, name: 'Front Desk Concierge' });
 }
 
 function sendNewEmails() {
@@ -856,12 +875,15 @@ function loadQuestionLog() {
   if (!fs.existsSync(QUESTION_LOG_FILE)) return [];
   return JSON.parse(fs.readFileSync(QUESTION_LOG_FILE, 'utf8'));
 }
-function logQuestion(question) {
+// entry: { q, at, ok, unanswered, tools, inTok, outTok, loc } — loc is a one-way hash of the internet address,
+// only used to count how many different places (roughly, branches) use the tool.
+function logQuestion(entry) {
   const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
   const log = loadQuestionLog().filter((q) => q.at > cutoff).slice(-5000);
-  log.push({ q: question.slice(0, 300), at: Date.now() });
+  log.push({ ...entry, q: String(entry.q).slice(0, 300), at: Date.now() });
   fs.writeFileSync(QUESTION_LOG_FILE, JSON.stringify(log));
 }
+const UNANSWERED_RE = /isn'?t in (the|our) (saved )?knowledge base|not (in|on) (the )?(saved knowledge base|website)|couldn'?t find|can'?t find|don'?t have (that|any|specific) (info|information|details)|no information (about|on)|ask support|check with (a|your) (supervisor|manager)/i;
 function loadFaq() {
   if (!fs.existsSync(FAQ_FILE)) return { updatedAt: null, source: 'starter', questions: STARTER_FAQ };
   return JSON.parse(fs.readFileSync(FAQ_FILE, 'utf8'));
@@ -912,6 +934,95 @@ function scheduleFaqRefresh() {
   };
   tick();
   setInterval(tick, 30 * 60 * 1000);
+}
+
+// ---------- weekly usage report (emailed Mondays by the concierge@ Gmail script) ----------
+// Rough Claude cost for chat questions, per million tokens (input, output). Only Sonnet 5 is priced here.
+const CHAT_PRICE_PER_MTOK = { 'claude-sonnet-5': [2, 10] };
+const TOPIC_SCHEMA = {
+  type: 'object',
+  properties: { topics: { type: 'array', items: { type: 'object', properties: { topic: { type: 'string' }, count: { type: 'integer' } }, required: ['topic', 'count'], additionalProperties: false } } },
+  required: ['topics'],
+  additionalProperties: false,
+};
+async function topTopics(questions) {
+  if (questions.length < 5 || DEMO_MODE) return [];
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL, max_tokens: 2048,
+      system: 'Group these YMCA front desk staff questions into at most 8 topics (e.g. "Branch hours", "Swim lessons", "Bank Draft Discount"), with how many questions fall under each, biggest first. Short general topic names; no personal details.',
+      output_config: { format: { type: 'json_schema', schema: TOPIC_SCHEMA } },
+      messages: [{ role: 'user', content: questions.map((q) => '- ' + q.replace(/\s+/g, ' ')).join('\n') }],
+    }),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!r.ok) return [];
+  const data = await r.json();
+  if (data.stop_reason !== 'end_turn') return [];
+  return (JSON.parse((data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')).topics || []).slice(0, 8);
+}
+async function buildUsageReport() {
+  const now = Date.now(), week = 7 * 24 * 3600 * 1000;
+  const log = loadQuestionLog();
+  const thisWeek = log.filter((q) => q.at > now - week);
+  const lastWeek = log.filter((q) => q.at > now - 2 * week && q.at <= now - week);
+  const fmtDay = (ms) => new Date(ms).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'short', month: 'short', day: 'numeric' });
+  const hourOf = (ms) => Number(new Date(ms).toLocaleString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric', hour12: false })) % 24;
+  const countBy = (arr, fn) => arr.reduce((m, x) => { const k = fn(x); m.set(k, (m.get(k) || 0) + 1); return m; }, new Map());
+
+  const byDay = [...countBy(thisWeek, (q) => arizonaISODate(q.at))].sort();
+  const busiestHour = [...countBy(thisWeek, (q) => hourOf(q.at))].sort((a, b) => b[1] - a[1])[0];
+  const hourLabel = (h) => new Date(Date.UTC(2026, 0, 1, h + 7)).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric' });
+  const places = new Set(thisWeek.map((q) => q.loc).filter(Boolean)).size;
+  const unanswered = thisWeek.filter((q) => q.ok !== false && q.unanswered);
+  const failed = thisWeek.filter((q) => q.ok === false).length;
+  const programSearches = thisWeek.filter((q) => (q.tools || []).includes('search_daxko_programs')).length;
+  const siteSearches = thisWeek.filter((q) => (q.tools || []).includes('search_website')).length;
+  const price = CHAT_PRICE_PER_MTOK[ANTHROPIC_MODEL];
+  const inTok = thisWeek.reduce((n, q) => n + (q.inTok || 0), 0), outTok = thisWeek.reduce((n, q) => n + (q.outTok || 0), 0);
+  const cost = price ? (inTok * price[0] + outTok * price[1]) / 1e6 : null;
+
+  const supportQs = loadQuestions().entries.filter((q) => q.createdAt > now - week);
+  const openSupport = loadQuestions().entries.filter((q) => !q.handled).length;
+  const newAnnouncements = loadAnnouncements().entries.filter((a) => a.receivedAt > now - week);
+  const review = loadWebReview();
+  const reviewIssues = (review.issues || []).reduce((n, p) => n + p.items.length, 0);
+  let topics = [];
+  try { topics = await topTopics(thisWeek.map((q) => q.q)); } catch { /* report still goes out without topics */ }
+
+  const esc = escapeHtml;
+  const change = lastWeek.length ? Math.round(((thisWeek.length - lastWeek.length) / lastWeek.length) * 100) : null;
+  const row = (label, value) => `<tr><td style="padding:4px 14px 4px 0;color:#555">${label}</td><td style="padding:4px 0"><strong>${value}</strong></td></tr>`;
+  const html =
+    `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1e2422;max-width:640px">` +
+    `<h2 style="margin:0 0 4px">Front Desk Concierge — weekly usage</h2>` +
+    `<p style="margin:0 0 16px;color:#555">${fmtDay(now - week)} – ${fmtDay(now)}</p>` +
+    '<table style="border-collapse:collapse;margin-bottom:16px">' +
+    row('Questions asked', thisWeek.length + (change === null ? '' : ` (${change >= 0 ? '+' : ''}${change}% vs. the week before)`)) +
+    row('Couldn\'t answer', unanswered.length + (thisWeek.length ? ` (${Math.round((unanswered.length / thisWeek.length) * 100)}%)` : '')) +
+    (failed ? row('Errors', failed) : '') +
+    row('Different locations using it', places) +
+    row('Busiest time', busiestHour ? `around ${hourLabel(busiestHour[0])} (${busiestHour[1]} questions)` : '—') +
+    row('Live Daxko program searches', programSearches) +
+    row('Website searches', siteSearches) +
+    row('Sent to Support', `${supportQs.length} this week · ${openSupport} still open in Admin`) +
+    row('Announcements added from email', newAnnouncements.length) +
+    row('Website review', review.reviewedAt ? `${reviewIssues} possible out-of-date item${reviewIssues === 1 ? '' : 's'} (last run ${fmtDay(review.reviewedAt)})` : 'not run yet') +
+    (cost !== null ? row('Estimated Claude cost (chat)', '$' + cost.toFixed(2)) : '') +
+    '</table>' +
+    (byDay.length ? '<h3 style="margin:18px 0 6px">Questions per day</h3><p style="margin:0">' + byDay.map(([d, n]) => `${fmtDay(new Date(d + 'T19:00:00Z').getTime())}: <strong>${n}</strong>`).join(' &nbsp;·&nbsp; ') + '</p>' : '') +
+    (topics.length ? '<h3 style="margin:18px 0 6px">Top topics</h3><ol style="margin:0;padding-left:20px">' + topics.map((t) => `<li>${esc(t.topic)} — ${t.count}</li>`).join('') + '</ol>' : '') +
+    (unanswered.length ? '<h3 style="margin:18px 0 6px">Questions it couldn\'t answer</h3><p style="margin:0 0 6px;color:#555">Good candidates for new saved answers in Admin.</p><ul style="margin:0;padding-left:20px">' +
+      unanswered.slice(-15).reverse().map((q) => `<li>${esc(q.q)} <span style="color:#888">(${fmtDay(q.at)})</span></li>`).join('') + '</ul>' : '') +
+    (newAnnouncements.length ? '<h3 style="margin:18px 0 6px">New announcements</h3><ul style="margin:0;padding-left:20px">' + newAnnouncements.map((a) => `<li>${esc(a.title)}${a.status === 'pending' ? ' <em>(waiting for approval)</em>' : ''}</li>`).join('') + '</ul>' : '') +
+    `<p style="margin:20px 0 0;color:#888;font-size:12px">From the Front Desk Concierge (${esc(PUBLIC_URL)}). Details are in Admin.</p></div>`;
+  return {
+    to: REPORT_TO,
+    subject: `Front Desk Concierge: ${thisWeek.length} question${thisWeek.length === 1 ? '' : 's'} this week${unanswered.length ? `, ${unanswered.length} unanswered` : ''}`,
+    html,
+  };
 }
 
 // ---------- live program search (Daxko online registration) ----------
@@ -1103,7 +1214,6 @@ route('POST', '/api/chat', async (req, res, params, ip) => {
   if (!body || !body.question || typeof body.question !== 'string' || !body.question.trim()) {
     return sendJson(res, 400, { error: 'missing_question' });
   }
-  try { logQuestion(body.question.trim()); } catch (e) { console.error('Could not log question', e.message); }
   const kb = loadKb();
   const flyers = findRelatedFlyers(kb, body.question).map((e) => ({ id: e.id, title: e.title, filename: e.attachment.filename, url: `/uploads/${e.attachment.path}` }));
 
@@ -1137,13 +1247,19 @@ route('POST', '/api/chat', async (req, res, params, ip) => {
   }
   messages.push({ role: 'user', content: body.question });
 
-  try {
-    const answer = await callAnthropic(instructions, messages);
-    const seen = new Set(flyers.map((f) => f.url));
-    for (const f of relatedAnnouncementFlyers(body.question, answer)) if (!seen.has(f.url)) { seen.add(f.url); flyers.push(f); }
-    sendJson(res, 200, { answer, flyers });
-  } catch {
-    sendJson(res, 502, { error: 'upstream_error' });
+  {
+    const stats = {};
+    const loc = crypto.createHmac('sha256', secret).update(ip).digest('hex').slice(0, 12);
+    try {
+      const answer = await callAnthropic(instructions, messages, stats);
+      const seen = new Set(flyers.map((f) => f.url));
+      for (const f of relatedAnnouncementFlyers(body.question, answer)) if (!seen.has(f.url)) { seen.add(f.url); flyers.push(f); }
+      sendJson(res, 200, { answer, flyers });
+      try { logQuestion({ q: body.question.trim(), ok: true, unanswered: UNANSWERED_RE.test(answer), tools: stats.tools, inTok: stats.inTok, outTok: stats.outTok, loc }); } catch (e) { console.error('Could not log question', e.message); }
+    } catch {
+      sendJson(res, 502, { error: 'upstream_error' });
+      try { logQuestion({ q: body.question.trim(), ok: false, tools: stats.tools || [], inTok: stats.inTok || 0, outTok: stats.outTok || 0, loc }); } catch (e) { console.error('Could not log question', e.message); }
+    }
   }
 });
 
@@ -1274,6 +1390,21 @@ route('POST', '/api/inbound-email', async (req, res) => {
   saveAnnouncements(fresh);
   console.log(`Inbound email "${email.subject}" from ${address}: ${found.length} announcement(s), ${saved ? saved.length : 0} flyer(s) saved, ${trusted ? 'live' : 'awaiting approval'}`);
   sendJson(res, 200, { ok: true, announcements: found.length });
+});
+// The concierge@ Gmail script fetches this Monday mornings and emails it to REPORT_TO.
+route('GET', '/api/usage-report', async (req, res) => {
+  const given = String(req.headers['x-concierge-secret'] || '');
+  const ok = given.length === INBOUND_SECRET.length && crypto.timingSafeEqual(Buffer.from(given), Buffer.from(INBOUND_SECRET));
+  if (!ok) return sendJson(res, 401, { error: 'bad_secret' });
+  sendJson(res, 200, await buildUsageReport());
+});
+// Preview of this week's report for admins.
+route('GET', '/admin/usage', async (req, res) => {
+  if (!isAdmin(req)) { res.writeHead(302, { Location: '/admin' }); return res.end(); }
+  const r = await buildUsageReport();
+  const body = `<!doctype html><meta charset="utf-8"><title>Weekly usage</title><body style="margin:24px">${r.html}<p style="font-family:Arial;font-size:12px;color:#888">Emailed to ${escapeHtml(r.to)} Mondays. <a href="/admin">← Back to Admin</a></p></body>`;
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(body);
 });
 route('GET', '/api/admin/announcements', async (req, res) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
