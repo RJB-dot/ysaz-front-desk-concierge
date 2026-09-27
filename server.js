@@ -836,8 +836,21 @@ const STARTER_FAQ = [
   'How does a member cancel their membership?',
   'How does a member redeem a YMCA360 App reward?',
   'How can a member apply for financial assistance?',
+  // extras that fill in when a question above is hidden (see FAQ_HIDDEN_UNTIL)
+  'How many guest passes do members get?',
+  'What are the Learn & Play rules for kids?',
+  'How do we handle a facility rental request?',
 ];
 const FAQ_SIZE = 8;
+// Topics kept OUT of the sidebar list until a date (YYYY-MM-DD, Arizona) — shown starting the day after.
+// Staff can still ask about them; they just aren't suggested yet.
+const FAQ_HIDDEN_UNTIL = [
+  { until: '2026-10-01', pattern: /bank draft|fee (increase|change)|rate (increase|change)|price (increase|change)|new (rates|prices|fees)|membership (rates|prices|fees).*(change|increase|going up)|(november|nov\.?) (1|rates|prices)/i },
+];
+function faqVisible(question) {
+  const today = arizonaISODate(Date.now());
+  return !FAQ_HIDDEN_UNTIL.some((h) => today <= h.until && h.pattern.test(question));
+}
 const FAQ_MIN_QUESTIONS = 15; // below this, it's still mostly starter samples
 function loadQuestionLog() {
   if (!fs.existsSync(QUESTION_LOG_FILE)) return [];
@@ -866,7 +879,7 @@ async function refreshFaq() {
   if (recent.length >= FAQ_MIN_QUESTIONS && !DEMO_MODE) {
     const instructions =
       `Below are questions YMCA of Southern Arizona front desk staff typed into their help tool over the last 30 days. ` +
-      `Pick the ${FAQ_SIZE} topics asked about MOST OFTEN and write each as one short, clear, general question (under 70 characters), most common first. ` +
+      `Pick the ${FAQ_SIZE + 4} topics asked about MOST OFTEN and write each as one short, clear, general question (under 70 characters), most common first. ` +
       'Merge questions that mean the same thing. Never include names, phone numbers, emails, member/account numbers or other personal details — make every question general. Skip greetings, tests and nonsense.';
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -882,18 +895,20 @@ async function refreshFaq() {
     const data = await r.json();
     if (data.stop_reason === 'end_turn') {
       common = (JSON.parse((data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('')).questions || [])
-        .map((q) => String(q).trim()).filter(Boolean).slice(0, FAQ_SIZE);
+        .map((q) => String(q).trim()).filter(Boolean).slice(0, FAQ_SIZE + 4);
     }
   }
   // Top up with starter samples so the list is always full.
-  const questions = [...common, ...STARTER_FAQ.filter((s) => !common.some((c) => c.toLowerCase() === s.toLowerCase()))].slice(0, FAQ_SIZE);
+  const questions = [...common, ...STARTER_FAQ.filter((s) => !common.some((c) => c.toLowerCase() === s.toLowerCase()))].slice(0, FAQ_SIZE + 6);
   fs.writeFileSync(FAQ_FILE, JSON.stringify({ updatedAt: Date.now(), day: arizonaISODate(Date.now()), source: common.length ? 'usage' : 'starter', basedOn: recent.length, questions }, null, 2));
   console.log(`Common questions refreshed: ${common.length} from ${recent.length} recent questions, ${questions.length - common.length} starter samples`);
 }
 function scheduleFaqRefresh() {
   const tick = () => {
     const az = arizonaDay();
-    if (loadFaq().day !== az.date && az.hour >= 3) refreshFaq().catch((e) => console.error('Common questions refresh failed', e.message));
+    const faq = loadFaq();
+    // Daily after 3am — or right away if the saved list is too short to fill 8 slots once topics are hidden.
+    if ((faq.day !== az.date && az.hour >= 3) || faq.questions.filter(faqVisible).length < FAQ_SIZE) refreshFaq().catch((e) => console.error('Common questions refresh failed', e.message));
   };
   tick();
   setInterval(tick, 30 * 60 * 1000);
@@ -1296,7 +1311,7 @@ route('DELETE', '/api/admin/announcements/:id', async (req, res, params) => {
 route('GET', '/api/faq', async (req, res) => {
   if (!isStaff(req) && !isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
   const faq = loadFaq();
-  sendJson(res, 200, { questions: faq.questions, source: faq.source });
+  sendJson(res, 200, { questions: faq.questions.filter(faqVisible).slice(0, FAQ_SIZE), source: faq.source });
 });
 
 route('GET', '/api/admin/kb', async (req, res) => {
