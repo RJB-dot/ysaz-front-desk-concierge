@@ -1311,6 +1311,15 @@ route('PUT', '/api/admin/questions/:id', async (req, res, params) => {
   saveQuestions(q);
   sendJson(res, 200, entry);
 });
+route('DELETE', '/api/admin/questions/:id', async (req, res, params) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const q = loadQuestions();
+  const before = q.entries.length;
+  q.entries = q.entries.filter((e) => e.id !== params.id);
+  if (q.entries.length === before) return sendJson(res, 404, { error: 'not_found' });
+  saveQuestions(q);
+  sendJson(res, 200, { ok: true });
+});
 
 route('GET', '/api/admin/web-pages', async (req, res) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });

@@ -208,6 +208,7 @@
         '<div class="kb-actions">' +
           (q.handled ? '' : '<button data-act="answer">Add as answer</button>') +
           '<button data-act="toggle">'+(q.handled ? 'Reopen' : 'Mark handled')+'</button>' +
+          '<button data-act="del">Delete</button>' +
         '</div></div>' +
         '<div class="q-meta">'+meta+'</div>';
       var answerBtn = item.querySelector('[data-act="answer"]');
@@ -218,6 +219,10 @@
         els.form.scrollIntoView({ behavior:'smooth', block:'start' });
       });
       item.querySelector('[data-act="toggle"]').addEventListener('click', function(){ setHandled(q, !q.handled); });
+      item.querySelector('[data-act="del"]').addEventListener('click', function(){
+        if(!confirm('Delete this question?\n\n"' + q.question + '"\n\nThis can\'t be undone.')) return;
+        fetch('/api/admin/questions/'+q.id, { method:'DELETE' }).then(loadQuestions);
+      });
       els.qList.appendChild(item);
     });
   }
