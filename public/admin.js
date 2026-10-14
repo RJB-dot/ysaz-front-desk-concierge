@@ -79,7 +79,9 @@
     els.cancel.hidden = false;
     els.status.textContent = ''; els.status.className = 'status-msg';
     renderFileCurrent();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    // The form sits below the other panels, so scroll to it rather than the top of the page.
+    els.form.closest('.panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    els.content.focus({ preventScroll: true });
   }
 
   function setStatus(msg, ok){
