@@ -238,3 +238,8 @@ a{color:var(--accent);}
 .un-box input[type=text], .un-box textarea{width:100%; box-sizing:border-box;}
 .un-box textarea{min-height:70px;}
 .un-box ul{margin:4px 0 0; padding-left:18px; font-size:12.5px;}
+
+/* answer edited in place */
+.kb-item.editing label{display:block; font-size:12.5px; margin:10px 0 4px;}
+.kb-item.editing label:first-child{margin-top:0;}
+.kb-item.editing input[type=text], .kb-item.editing textarea{width:100%; box-sizing:border-box;}

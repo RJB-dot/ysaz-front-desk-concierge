@@ -72,18 +72,6 @@
   }
   els.cancel.addEventListener('click', resetForm);
 
-  function startEdit(entry){
-    editingId = entry.id; editingEntry = entry; removeAttachmentFlag = false;
-    els.title.value = entry.title; els.content.value = entry.content; els.file.value = '';
-    els.formTitle.textContent = 'Edit answer';
-    els.cancel.hidden = false;
-    els.status.textContent = ''; els.status.className = 'status-msg';
-    renderFileCurrent();
-    // The form sits below the other panels, so scroll to it rather than the top of the page.
-    els.form.closest('.panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    els.content.focus({ preventScroll: true });
-  }
-
   function setStatus(msg, ok){
     els.status.textContent = msg;
     els.status.className = 'status-msg ' + (ok ? 'ok' : 'err');
@@ -118,7 +106,7 @@
         '<div class="row"><div class="ttl">'+escapeHtml(e.title)+'</div>' +
         '<div class="kb-actions"><button data-act="edit">Edit</button><button data-act="del">Delete</button></div></div>' +
         '<div class="body">'+linkify(e.content)+'</div>' + flyerHtml + expiryHtml;
-      item.querySelector('[data-act="edit"]').addEventListener('click', function(){ startEdit(e); });
+      item.querySelector('[data-act="edit"]').addEventListener('click', function(){ editInPlace(item, e); });
       item.querySelector('[data-act="del"]').addEventListener('click', function(){
         if(!confirm('Delete "'+e.title+'"? This can\'t be undone.')) return;
         fetch('/api/admin/kb/'+e.id, { method:'DELETE' }).then(function(){
@@ -127,6 +115,56 @@
         });
       });
       els.list.appendChild(item);
+    });
+  }
+
+  // Edit an answer right inside its own box (title, answer, flyer) — the page doesn't move.
+  function editInPlace(item, e){
+    var removeFlyer = false;
+    item.innerHTML =
+      '<label>Title</label><input type="text" class="ed-title">' +
+      '<label>Answer</label><textarea class="ed-content"></textarea>' +
+      '<div class="file-row ed-flyer"></div>' +
+      '<label>' + (e.attachment ? 'Replace the flyer' : 'Attach a flyer') + ' (optional — PDF or image)</label>' +
+      '<input type="file" class="ed-file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp">' +
+      '<div class="form-actions"><button type="button" class="btn primary ed-save">Save</button><button type="button" class="btn ed-cancel">Cancel</button></div>' +
+      '<div class="status-msg ed-status"></div>';
+    item.classList.add('editing');
+    item.querySelector('.ed-title').value = e.title;
+    var content = item.querySelector('.ed-content');
+    content.value = e.content;
+    content.style.height = Math.min(Math.max(content.scrollHeight + 4, 140), 600) + 'px';
+    function renderFlyer(){
+      var slot = item.querySelector('.ed-flyer');
+      if(e.attachment && !removeFlyer){
+        slot.innerHTML = '📎 <a href="/uploads/'+e.attachment.path+'" target="_blank" rel="noopener">'+escapeHtml(e.attachment.filename || 'Flyer')+'</a> ' +
+          '<button type="button" class="btn danger ed-remove" style="margin-left:8px;">Remove</button>';
+        slot.querySelector('.ed-remove').addEventListener('click', function(){ removeFlyer = true; renderFlyer(); });
+      } else {
+        slot.innerHTML = removeFlyer ? '<span class="q-meta">Flyer will be removed when you save.</span>' : '';
+      }
+    }
+    renderFlyer();
+    content.focus({ preventScroll: true });
+    var status = item.querySelector('.ed-status');
+    function say(msg, ok){ status.textContent = msg; status.className = 'status-msg ed-status ' + (ok ? 'ok' : 'err'); }
+    item.querySelector('.ed-cancel').addEventListener('click', loadList);
+    item.querySelector('.ed-save').addEventListener('click', function(){
+      var title = item.querySelector('.ed-title').value.trim();
+      var text = content.value.trim();
+      if(!title || !text){ say('Title and answer are both required.', false); return; }
+      var btn = item.querySelector('.ed-save');
+      btn.disabled = true; say('Saving…', true);
+      fetch('/api/admin/kb/'+e.id, {
+        method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify({ title: title, content: text })
+      }).then(function(r){ if(!r.ok) throw new Error(); }).then(function(){
+        var file = item.querySelector('.ed-file').files[0];
+        if(file){
+          var fd = new FormData(); fd.append('file', file);
+          return fetch('/api/admin/kb/'+e.id+'/attachment', { method:'POST', body: fd });
+        }
+        if(removeFlyer) return fetch('/api/admin/kb/'+e.id+'/attachment', { method:'DELETE' });
+      }).then(loadList).catch(function(){ btn.disabled = false; say('Something went wrong saving that.', false); });
     });
   }
 
