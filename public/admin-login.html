@@ -34,7 +34,7 @@
         method: 'POST', headers: {'content-type':'application/json'},
         body: JSON.stringify({ password: password })
       }).then(function(r){
-        if(r.ok){ window.location.href = '/admin'; return; }
+        if(r.ok){ window.location.href = '/admin' + window.location.search; return; } // keeps ?answer=… from email links
         if(r.status === 429){ err.textContent = 'Too many attempts — try again later.'; }
         else { err.textContent = "That password didn't work."; }
         btn.disabled = false; input.value=''; input.focus();

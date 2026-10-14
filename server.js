@@ -37,6 +37,8 @@ const WEB_PAGES_FILE = path.join(DATA_DIR, 'web-pages.json');
 const WEB_REVIEW_FILE = path.join(DATA_DIR, 'web-review.json');
 const ANNOUNCEMENTS_FILE = path.join(DATA_DIR, 'announcements.json');
 const QUESTION_LOG_FILE = path.join(DATA_DIR, 'question-log.json');
+// Unanswered questions an admin has answered (or dismissed) — keyed by normalized question text.
+const UNANSWERED_DONE_FILE = path.join(DATA_DIR, 'unanswered-done.json');
 const FAQ_FILE = path.join(DATA_DIR, 'faq.json');
 const INBOUND_SECRET_FILE = path.join(DATA_DIR, 'inbound-secret.txt');
 // Public URL of this app, used in the Gmail setup script shown in /admin.
@@ -978,6 +980,8 @@ async function buildUsageReport() {
   const places = new Set(thisWeek.map((q) => q.loc).filter(Boolean)).size;
   const unanswered = thisWeek.filter((q) => q.ok !== false && q.unanswered);
   const failed = thisWeek.filter((q) => q.ok === false).length;
+  const answeredSince = loadUnansweredDone();
+  const unansweredOpen = unanswered.filter((q) => !answeredSince.has(normQuestion(q.q))); // not yet answered in Admin
   const programSearches = thisWeek.filter((q) => (q.tools || []).includes('search_daxko_programs')).length;
   const siteSearches = thisWeek.filter((q) => (q.tools || []).includes('search_website')).length;
   const price = CHAT_PRICE_PER_MTOK[ANTHROPIC_MODEL];
@@ -999,6 +1003,8 @@ async function buildUsageReport() {
     `<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1e2422;max-width:640px">` +
     `<h2 style="margin:0 0 4px">Front Desk Concierge — weekly usage</h2>` +
     `<p style="margin:0 0 16px;color:#555">${fmtDay(now - week)} – ${fmtDay(now)}</p>` +
+    (unansweredOpen.length ? '<h3 style="margin:0 0 6px">Questions it couldn\'t answer</h3><p style="margin:0 0 6px;color:#555">Click one to add the missing information as a saved answer.</p><ul style="margin:0;padding-left:20px">' +
+      unansweredOpen.slice(-30).reverse().map((q) => `<li><a href="${esc(answerLink(q.q))}">${esc(q.q)}</a> <span style="color:#888">(${fmtDay(q.at)})</span></li>`).join('') + '</ul><div style="height:16px"></div>' : '') +
     '<table style="border-collapse:collapse;margin-bottom:16px">' +
     row('Questions asked', thisWeek.length + (change === null ? '' : ` (${change >= 0 ? '+' : ''}${change}% vs. the week before)`)) +
     row('Couldn\'t answer', unanswered.length + (thisWeek.length ? ` (${Math.round((unanswered.length / thisWeek.length) * 100)}%)` : '')) +
@@ -1014,8 +1020,6 @@ async function buildUsageReport() {
     '</table>' +
     (byDay.length ? '<h3 style="margin:18px 0 6px">Questions per day</h3><p style="margin:0">' + byDay.map(([d, n]) => `${fmtDay(new Date(d + 'T19:00:00Z').getTime())}: <strong>${n}</strong>`).join(' &nbsp;·&nbsp; ') + '</p>' : '') +
     (topics.length ? '<h3 style="margin:18px 0 6px">Top topics</h3><ol style="margin:0;padding-left:20px">' + topics.map((t) => `<li>${esc(t.topic)} — ${t.count}</li>`).join('') + '</ol>' : '') +
-    (unanswered.length ? '<h3 style="margin:18px 0 6px">Questions it couldn\'t answer</h3><p style="margin:0 0 6px;color:#555">Good candidates for new saved answers in Admin.</p><ul style="margin:0;padding-left:20px">' +
-      unanswered.slice(-15).reverse().map((q) => `<li>${esc(q.q)} <span style="color:#888">(${fmtDay(q.at)})</span></li>`).join('') + '</ul>' : '') +
     (newAnnouncements.length ? '<h3 style="margin:18px 0 6px">New announcements</h3><ul style="margin:0;padding-left:20px">' + newAnnouncements.map((a) => `<li>${esc(a.title)}${a.status === 'pending' ? ' <em>(waiting for approval)</em>' : ''}</li>`).join('') + '</ul>' : '') +
     `<p style="margin:20px 0 0;color:#888;font-size:12px">From the Front Desk Concierge (${esc(PUBLIC_URL)}). Details are in Admin.</p></div>`;
   return {
@@ -1025,6 +1029,64 @@ async function buildUsageReport() {
   };
 }
 
+// ---------- questions the concierge couldn't answer → admin fills in the missing info ----------
+function normQuestion(q) {
+  return String(q).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function answerLink(q) {
+  return `${PUBLIC_URL}/admin?answer=${encodeURIComponent(q)}`;
+}
+function loadUnansweredDone() {
+  return new Set(fs.existsSync(UNANSWERED_DONE_FILE) ? JSON.parse(fs.readFileSync(UNANSWERED_DONE_FILE, 'utf8')) : []);
+}
+// Last 30 days of unanswered questions, newest first, repeats grouped, minus ones already answered here.
+function unansweredQuestions() {
+  const done = loadUnansweredDone();
+  const groups = new Map();
+  for (const e of loadQuestionLog()) {
+    if (e.ok === false || !e.unanswered) continue;
+    const key = normQuestion(e.q);
+    if (!key || done.has(key)) continue;
+    const g = groups.get(key) || { question: e.q, count: 0, lastAt: 0 };
+    g.count++;
+    if (e.at >= g.lastAt) { g.lastAt = e.at; g.question = e.q; }
+    groups.set(key, g);
+  }
+  return [...groups.values()].sort((a, b) => b.lastAt - a.lastAt);
+}
+const NEEDED_SCHEMA = {
+  type: 'object',
+  properties: {
+    title: { type: 'string', description: 'Short title for the new saved answer, in the style of the existing titles' },
+    needed: { type: 'array', items: { type: 'string' }, description: 'The specific facts a manager must supply so the concierge can answer this next time' },
+    related: { type: 'array', items: { type: 'string' }, description: 'Exact titles of existing saved answers that cover part of this, if any' },
+  },
+  required: ['title', 'needed', 'related'],
+  additionalProperties: false,
+};
+async function draftNeededInfo(question) {
+  const kb = loadKb();
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: ANTHROPIC_MODEL, max_tokens: 1024,
+      system:
+        'A YMCA of Southern Arizona front desk staff member asked the Front Desk Concierge a question it could not answer from its saved knowledge base. ' +
+        'A manager is about to write a new saved answer. Suggest a title, and list the specific facts the manager needs to provide (e.g. price, days/times, which branches, who to contact, how to sign up) — 2 to 6 short items phrased as questions. ' +
+        'Do not guess the facts themselves. If existing saved answers already cover part of it, list their exact titles.',
+      output_config: { format: { type: 'json_schema', schema: NEEDED_SCHEMA } },
+      messages: [{ role: 'user', content: `Existing saved answer titles:\n${kb.entries.map((e) => '- ' + e.title).join('\n')}\n\nUnanswered staff question: ${question}` }],
+    }),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!r.ok) throw new Error('Anthropic HTTP ' + r.status);
+  const data = await r.json();
+  if (data.stop_reason !== 'end_turn') throw new Error('draft stopped: ' + data.stop_reason);
+  const out = JSON.parse((data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(''));
+  const titles = new Set(kb.entries.map((e) => e.title));
+  return { title: out.title, needed: out.needed.slice(0, 8), related: out.related.filter((t) => titles.has(t)) };
+}
 // ---------- live program search (Daxko online registration) ----------
 // Uses the same public search the Daxko "Program Search" page runs in the browser (no login needed).
 // Daxko matches ANY word in the keywords, so every search is expanded into variants (e.g. "volleyball",
@@ -1415,6 +1477,35 @@ route('GET', '/admin/usage', async (req, res) => {
   const body = `<!doctype html><meta charset="utf-8"><title>Weekly usage</title><body style="margin:24px">${r.html}<p style="font-family:Arial;font-size:12px;color:#888">Emailed to ${escapeHtml(r.to)} Mondays. <a href="/admin">← Back to Admin</a></p></body>`;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(body);
+});
+// Questions the concierge couldn't answer (see unansweredQuestions above).
+route('GET', '/api/admin/unanswered', async (req, res) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  sendJson(res, 200, unansweredQuestions());
+});
+route('POST', '/api/admin/unanswered/draft', async (req, res) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const body = await readJsonBody(req, 10000).catch(() => null);
+  const question = body && String(body.question || '').trim().slice(0, 300);
+  if (!question) return sendJson(res, 400, { error: 'missing_question' });
+  if (DEMO_MODE) return sendJson(res, 200, { title: question, needed: [], related: [] });
+  try {
+    sendJson(res, 200, await draftNeededInfo(question));
+  } catch (e) {
+    console.error('Unanswered draft failed', e.message);
+    sendJson(res, 200, { title: question, needed: [], related: [] }); // the form still works without suggestions
+  }
+});
+// Called after the answer is saved (or to dismiss a question that doesn't need one).
+route('POST', '/api/admin/unanswered/done', async (req, res) => {
+  if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
+  const body = await readJsonBody(req, 10000).catch(() => null);
+  const key = body && normQuestion(body.question || '');
+  if (!key) return sendJson(res, 400, { error: 'missing_question' });
+  const done = loadUnansweredDone();
+  done.add(key);
+  fs.writeFileSync(UNANSWERED_DONE_FILE, JSON.stringify([...done].slice(-2000)));
+  sendJson(res, 200, { ok: true });
 });
 route('GET', '/api/admin/announcements', async (req, res) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });

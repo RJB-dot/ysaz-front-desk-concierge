@@ -227,6 +227,113 @@
     });
   }
 
+  // ---------- questions the concierge couldn't answer → fill in the missing info ----------
+  var unList = document.getElementById('un-list');
+  var unCount = document.getElementById('un-count');
+  var unOpenBox = null;
+  function loadUnanswered(openQuestion){
+    return fetch('/api/admin/unanswered').then(function(r){ return r.json(); }).then(function(list){
+      unCount.textContent = list.length;
+      unList.innerHTML = list.length ? '' : '<div class="empty">Nothing waiting — every recent question was answered.</div>';
+      var target = null;
+      list.forEach(function(u){
+        var item = renderUnanswered(u);
+        if(openQuestion && u.question.trim().toLowerCase() === openQuestion.trim().toLowerCase()) target = item;
+      });
+      // Opened from an email/usage-page link: open that question (add it if it's no longer listed).
+      if(openQuestion && !target){
+        if(!list.length) unList.innerHTML = '';
+        target = renderUnanswered({ question: openQuestion, count: 0, lastAt: null }, true);
+      }
+      if(target){ openAnswerBox(target); target.scrollIntoView({ behavior:'smooth', block:'start' }); }
+      if(openQuestion) history.replaceState(null, '', '/admin'); // so a refresh doesn't reopen it
+    }).catch(function(){ unList.innerHTML = '<div class="empty">Couldn\'t load unanswered questions.</div>'; });
+  }
+  function renderUnanswered(u, atTop){
+    var item = document.createElement('div');
+    item.className = 'kb-item';
+    item._question = u.question;
+    item.innerHTML =
+      '<button type="button" class="un-q">' + escapeHtml(u.question) + '</button>' +
+      '<div class="q-meta">' + (u.lastAt ? (u.count > 1 ? 'Asked ' + u.count + ' times · last ' : 'Asked ') + fmtDate(u.lastAt) : 'From the weekly report') + '</div>';
+    item.querySelector('.un-q').addEventListener('click', function(){
+      if(item.querySelector('.un-box')) closeAnswerBox(item); else openAnswerBox(item);
+    });
+    if(atTop && unList.firstChild) unList.insertBefore(item, unList.firstChild); else unList.appendChild(item);
+    return item;
+  }
+  function closeAnswerBox(item){
+    var box = item.querySelector('.un-box');
+    if(box) box.remove();
+    if(unOpenBox === item) unOpenBox = null;
+  }
+  function openAnswerBox(item){
+    if(unOpenBox && unOpenBox !== item) closeAnswerBox(unOpenBox);
+    unOpenBox = item;
+    var question = item._question;
+    var box = document.createElement('div');
+    box.className = 'un-box';
+    box.innerHTML = '<div class="q-meta">Working out what information is needed…</div>';
+    item.appendChild(box);
+    fetch('/api/admin/unanswered/draft', {
+      method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ question: question })
+    }).then(function(r){ return r.json(); }).catch(function(){ return { title: question, needed: [], related: [] }; }).then(function(d){
+      if(!box.isConnected) return;
+      var html =
+        (d.related && d.related.length ? '<div class="q-meta">Partly covered already by: <strong>' + d.related.map(escapeHtml).join('</strong>, <strong>') + '</strong> — you could edit that answer below instead.</div>' : '') +
+        '<label>Title</label><input type="text" class="un-title" value="' + escapeHtml(d.title || question) + '">';
+      (d.needed || []).forEach(function(n, i){
+        html += '<label for="un-n'+i+'">' + escapeHtml(n) + '</label><input type="text" class="un-need" id="un-n'+i+'" data-label="' + escapeHtml(n) + '">';
+      });
+      html +=
+        '<label>' + ((d.needed || []).length ? 'Anything else staff should know (optional)' : 'The answer') + '</label><textarea class="un-extra"></textarea>' +
+        '<label>Attach a flyer (optional — PDF or image)</label><input type="file" class="un-file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp">' +
+        '<div class="form-actions">' +
+          '<button type="button" class="btn primary un-save">Save as answer</button>' +
+          '<button type="button" class="btn un-dismiss">Doesn\'t need an answer</button>' +
+          '<button type="button" class="btn un-cancel">Cancel</button>' +
+        '</div><div class="status-msg un-status"></div>';
+      box.innerHTML = html;
+      var status = box.querySelector('.un-status');
+      function say(msg, ok){ status.textContent = msg; status.className = 'status-msg un-status ' + (ok ? 'ok' : 'err'); }
+      function markDone(){
+        return fetch('/api/admin/unanswered/done', {
+          method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ question: question })
+        });
+      }
+      box.querySelector('.un-cancel').addEventListener('click', function(){ closeAnswerBox(item); });
+      box.querySelector('.un-dismiss').addEventListener('click', function(){
+        if(!confirm('Remove this question from the list without adding an answer?')) return;
+        markDone().then(function(){ loadUnanswered(); });
+      });
+      box.querySelector('.un-save').addEventListener('click', function(){
+        var title = box.querySelector('.un-title').value.trim();
+        var lines = [];
+        box.querySelectorAll('.un-need').forEach(function(inp){
+          if(inp.value.trim()) lines.push('- ' + inp.getAttribute('data-label') + ' ' + inp.value.trim());
+        });
+        var extra = box.querySelector('.un-extra').value.trim();
+        if(extra) lines.push((lines.length ? '\n' : '') + extra);
+        var content = lines.join('\n').trim();
+        if(!title || !content){ say('Add a title and at least one piece of information.', false); return; }
+        content += '\n\nSource: Admin, answering a staff question ("' + question + '"), ' + new Date().toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }) + '.';
+        var btn = box.querySelector('.un-save');
+        btn.disabled = true; say('Saving…', true);
+        fetch('/api/admin/kb', {
+          method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ title: title, content: content })
+        }).then(function(r){ if(!r.ok) throw new Error(); return r.json(); }).then(function(entry){
+          var file = box.querySelector('.un-file').files[0];
+          if(!file) return entry;
+          var fd = new FormData(); fd.append('file', file);
+          return fetch('/api/admin/kb/'+entry.id+'/attachment', { method:'POST', body: fd }).then(function(){ return entry; });
+        }).then(markDone).then(function(){
+          loadList();
+          loadUnanswered();
+        }).catch(function(){ btn.disabled = false; say('Something went wrong saving that.', false); });
+      });
+    });
+  }
+
   // ---------- tucsonymca.org: weekly download of every page + out-of-date review ----------
   var webPoll = null;
   function loadWebPages(){
@@ -330,5 +437,6 @@
   loadAnnouncements();
   loadList();
   loadQuestions();
+  loadUnanswered(new URLSearchParams(window.location.search).get('answer'));
   loadWebPages();
 })();
