@@ -812,6 +812,10 @@ function sendWeeklyReport() {
   }
   const report = JSON.parse(res.getContentText());
   MailApp.sendEmail({ to: report.to, subject: report.subject, htmlBody: report.html, name: 'Front Desk Concierge' });
+  // e.g. the unanswered-questions list for Support
+  for (const e of report.extraEmails || []) {
+    MailApp.sendEmail({ to: e.to, replyTo: e.replyTo, subject: e.subject, htmlBody: e.html, name: 'Front Desk Concierge' });
+  }
 }
 
 function sendNewEmails() {
@@ -1026,6 +1030,21 @@ async function buildUsageReport() {
     to: REPORT_TO,
     subject: `Front Desk Concierge: ${thisWeek.length} question${thisWeek.length === 1 ? '' : 's'} this week${unanswered.length ? `, ${unanswered.length} unanswered` : ''}`,
     html,
+    // Also sent Mondays: just the unanswered questions, to Support (skipped in weeks with none).
+    extraEmails: unansweredOpen.length ? [{
+      to: SUPPORT_EMAIL,
+      replyTo: REPORT_TO,
+      subject: `Front Desk Concierge: ${unansweredOpen.length} question${unansweredOpen.length === 1 ? '' : 's'} it couldn't answer this week`,
+      html:
+        '<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1e2422;max-width:640px">' +
+        `<h2 style="margin:0 0 4px">Questions the Front Desk Concierge couldn't answer</h2>` +
+        `<p style="margin:0 0 16px;color:#555">${fmtDay(now - week)} – ${fmtDay(now)} · front desk staff asked these and the concierge didn't have the information.</p>` +
+        '<ul style="margin:0;padding-left:20px">' +
+        unansweredOpen.slice(-30).reverse().map((q) => `<li style="margin-bottom:4px"><a href="${esc(answerLink(q.q))}">${esc(q.q)}</a> <span style="color:#888">(${fmtDay(q.at)})</span></li>`).join('') +
+        '</ul>' +
+        '<p style="margin:16px 0 0">If you know an answer, click the question to add it in Admin (admin password needed), or just reply to this email with the information.</p>' +
+        `<p style="margin:20px 0 0;color:#888;font-size:12px">From the Front Desk Concierge (${esc(PUBLIC_URL)}).</p></div>`,
+    }] : [],
   };
 }
 
@@ -1474,7 +1493,7 @@ route('GET', '/api/usage-report', async (req, res) => {
 route('GET', '/admin/usage', async (req, res) => {
   if (!isAdmin(req)) { res.writeHead(302, { Location: '/admin' }); return res.end(); }
   const r = await buildUsageReport();
-  const body = `<!doctype html><meta charset="utf-8"><title>Weekly usage</title><body style="margin:24px">${r.html}<p style="font-family:Arial;font-size:12px;color:#888">Emailed to ${escapeHtml(r.to)} Mondays. <a href="/admin">← Back to Admin</a></p></body>`;
+  const body = `<!doctype html><meta charset="utf-8"><title>Weekly usage</title><body style="margin:24px">${r.html}<p style="font-family:Arial;font-size:12px;color:#888">Emailed to ${escapeHtml(r.to)} Mondays${r.extraEmails.length ? ` (and the unanswered questions to ${escapeHtml(SUPPORT_EMAIL)})` : ''}. <a href="/admin">← Back to Admin</a></p></body>`;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(body);
 });
