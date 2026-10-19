@@ -47,10 +47,12 @@ const PUBLIC_URL = process.env.PUBLIC_URL || 'https://ysaz-front-desk-concierge.
 const TRUSTED_EMAIL_DOMAINS = ['tucsonymca.org'];
 // Who gets the Monday usage report (sent by the concierge@ Gmail script).
 const REPORT_TO = process.env.REPORT_TO || 'rjb@tucsonymca.org';
+// Who gets the weekly website review (out-of-date pages on tucsonymca.org), sent with the Monday report.
+const WEBSITE_REPORT_TO = process.env.WEBSITE_REPORT_TO || 'anthonyf@tucsonymca.org';
 
 // Every page in the tucsonymca.org page sitemap is downloaded every Monday morning (Arizona time) and
 // searchable by the concierge; Claude then reviews each page for out-of-date content and emails
-// SUPPORT_EMAIL a list. The pages below are "pinned": always included with every question, not just
+// WEBSITE_REPORT_TO a list. The pages below are "pinned": always included with every question, not just
 // when a search finds them.
 const SITEMAP_URL = 'https://tucsonymca.org/page-sitemap.xml';
 const WEB_SOURCES = [
@@ -609,20 +611,30 @@ async function reviewWebsite(pages) {
   Object.assign(meta, { reviewedAt: Date.now(), issues: results, reviewFailures, emailed: false });
   console.log(`Website review: ${total} possible out-of-date items on ${results.length} pages (${newCount} new), ${reviewFailures} pages couldn't be reviewed`);
 
-  if (total && RESEND_API_KEY) {
-    const html =
-      `<p>The Front Desk Concierge checked all ${entries.length} pages on tucsonymca.org (${arizonaToday()}) and found ${total} item${total === 1 ? '' : 's'} on ${results.length} page${results.length === 1 ? '' : 's'} that may be out of date${newCount ? ` (${newCount} new since last week)` : ''}.</p>` +
+  meta.pagesReviewed = entries.length;
+  saveWebReview(meta);
+}
+// The review's email to WEBSITE_REPORT_TO — sent by the concierge@ Gmail script with the Monday report
+// (the review runs Monday 6am, the script at 7am). Null when there's nothing to report.
+function websiteReviewEmail(meta) {
+  const results = meta.issues || [];
+  const total = results.reduce((n, p) => n + p.items.length, 0);
+  if (!total || !meta.reviewedAt || Date.now() - meta.reviewedAt > 3 * 24 * 3600 * 1000) return null;
+  const newCount = results.reduce((n, p) => n + p.items.filter((i) => i.isNew).length, 0);
+  const day = new Date(meta.reviewedAt).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'long', month: 'long', day: 'numeric' });
+  return {
+    to: WEBSITE_REPORT_TO,
+    replyTo: REPORT_TO,
+    subject: `Website check: ${total} item${total === 1 ? '' : 's'} may be out of date${newCount ? ` (${newCount} new)` : ''}`,
+    html:
+      '<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1e2422;max-width:640px">' +
+      `<p>The Front Desk Concierge checked ${meta.pagesReviewed ? 'all ' + meta.pagesReviewed + ' pages' : 'the pages'} on tucsonymca.org (${day}) and found ${total} item${total === 1 ? '' : 's'} on ${results.length} page${results.length === 1 ? '' : 's'} that may be out of date${newCount ? ` (${newCount} new since last week)` : ''}.</p>` +
       results.map((p) =>
         `<h3 style="margin:18px 0 6px"><a href="${escapeHtml(p.url)}">${escapeHtml(p.title)}</a></h3><ul>` +
         p.items.map((i) => `<li>${i.isNew ? '<strong>[NEW]</strong> ' : ''}"${escapeHtml(i.quote)}"<br><span style="color:#555">${escapeHtml(i.problem)}</span></li>`).join('') +
         '</ul>').join('') +
-      '<p style="color:#666;font-size:12px">Found by an automated review, so double-check before changing anything. This list is also in the concierge at /admin.</p>';
-    try {
-      await sendEmailViaResend(SUPPORT_EMAIL, `Website check: ${total} item${total === 1 ? '' : 's'} may be out of date${newCount ? ` (${newCount} new)` : ''}`, html);
-      meta.emailed = true;
-    } catch { /* logged by sendEmailViaResend; still visible in /admin */ }
-  }
-  saveWebReview(meta);
+      '<p style="color:#666;font-size:12px">Found by an automated review, so double-check before changing anything. This list is also in the concierge at /admin.</p></div>',
+  };
 }
 
 // Monday in Arizona (no daylight saving, so a fixed offset is safe via Intl).
@@ -1031,7 +1043,7 @@ async function buildUsageReport() {
     subject: `Front Desk Concierge: ${thisWeek.length} question${thisWeek.length === 1 ? '' : 's'} this week${unanswered.length ? `, ${unanswered.length} unanswered` : ''}`,
     html,
     // Also sent Mondays: just the unanswered questions, to Support (skipped in weeks with none).
-    extraEmails: unansweredOpen.length ? [{
+    extraEmails: [websiteReviewEmail(review)].filter(Boolean).concat(unansweredOpen.length ? [{
       to: SUPPORT_EMAIL,
       replyTo: REPORT_TO,
       subject: `Front Desk Concierge: ${unansweredOpen.length} question${unansweredOpen.length === 1 ? '' : 's'} it couldn't answer this week`,
@@ -1044,7 +1056,7 @@ async function buildUsageReport() {
         '</ul>' +
         '<p style="margin:16px 0 0">If you know an answer, click the question to add it in Admin (admin password needed), or just reply to this email with the information.</p>' +
         `<p style="margin:20px 0 0;color:#888;font-size:12px">From the Front Desk Concierge (${esc(PUBLIC_URL)}).</p></div>`,
-    }] : [],
+    }] : []),
   };
 }
 
@@ -1493,7 +1505,7 @@ route('GET', '/api/usage-report', async (req, res) => {
 route('GET', '/admin/usage', async (req, res) => {
   if (!isAdmin(req)) { res.writeHead(302, { Location: '/admin' }); return res.end(); }
   const r = await buildUsageReport();
-  const body = `<!doctype html><meta charset="utf-8"><title>Weekly usage</title><body style="margin:24px">${r.html}<p style="font-family:Arial;font-size:12px;color:#888">Emailed to ${escapeHtml(r.to)} Mondays${r.extraEmails.length ? ` (and the unanswered questions to ${escapeHtml(SUPPORT_EMAIL)})` : ''}. <a href="/admin">← Back to Admin</a></p></body>`;
+  const body = `<!doctype html><meta charset="utf-8"><title>Weekly usage</title><body style="margin:24px">${r.html}<p style="font-family:Arial;font-size:12px;color:#888">Emailed to ${escapeHtml(r.to)} Mondays${r.extraEmails.length ? ` (also this week: ${r.extraEmails.map((e) => escapeHtml(e.subject) + ' → ' + escapeHtml(e.to)).join('; ')})` : ''}. <a href="/admin">← Back to Admin</a></p></body>`;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(body);
 });
