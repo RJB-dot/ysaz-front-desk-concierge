@@ -49,6 +49,10 @@ const TRUSTED_EMAIL_DOMAINS = ['tucsonymca.org'];
 const REPORT_TO = process.env.REPORT_TO || 'rjb@tucsonymca.org';
 // Who gets the weekly website review (out-of-date pages on tucsonymca.org), sent with the Monday report.
 const WEBSITE_REPORT_TO = process.env.WEBSITE_REPORT_TO || 'anthonyf@tucsonymca.org';
+// Website errors RJ flagged by hand: shown first in the website email, marked IMMEDIATE ATTENTION, through `until`.
+const WEBSITE_URGENT = [
+  { until: '2026-10-27', page: 'Northwest YMCA pool schedule (tucsonymca.org)', problem: 'The Northwest pool hours list Monday–Friday as 5:30am–11:00pm. The pool closes at 11:00 AM, not 11:00 PM. Correct swim-season hours: Mon–Fri 5:30am–11:00am, Sat 9:00am–1:00pm, Sun closed.' },
+];
 
 // Every page in the tucsonymca.org page sitemap is downloaded every Monday morning (Arizona time) and
 // searchable by the concierge; Claude then reviews each page for out-of-date content and emails
@@ -617,23 +621,29 @@ async function reviewWebsite(pages) {
 // The review's email to WEBSITE_REPORT_TO — sent by the concierge@ Gmail script with the Monday report
 // (the review runs Monday 6am, the script at 7am). Null when there's nothing to report.
 function websiteReviewEmail(meta) {
-  const results = meta.issues || [];
+  const today = arizonaISODate(Date.now());
+  const urgent = WEBSITE_URGENT.filter((u) => today <= u.until);
+  const fresh = meta.reviewedAt && Date.now() - meta.reviewedAt <= 3 * 24 * 3600 * 1000;
+  const results = fresh ? meta.issues || [] : [];
   const total = results.reduce((n, p) => n + p.items.length, 0);
-  if (!total || !meta.reviewedAt || Date.now() - meta.reviewedAt > 3 * 24 * 3600 * 1000) return null;
+  if (!total && !urgent.length) return null;
   const newCount = results.reduce((n, p) => n + p.items.filter((i) => i.isNew).length, 0);
-  const day = new Date(meta.reviewedAt).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'long', month: 'long', day: 'numeric' });
+  const day = fresh ? new Date(meta.reviewedAt).toLocaleDateString('en-US', { timeZone: 'America/Phoenix', weekday: 'long', month: 'long', day: 'numeric' }) : '';
   return {
     to: WEBSITE_REPORT_TO,
     replyTo: REPORT_TO,
-    subject: `Website check: ${total} item${total === 1 ? '' : 's'} may be out of date${newCount ? ` (${newCount} new)` : ''}`,
+    subject: (urgent.length ? 'IMMEDIATE ATTENTION — ' : '') + (total ? `Website check: ${total} item${total === 1 ? '' : 's'} may be out of date${newCount ? ` (${newCount} new)` : ''}` : 'Website correction needed'),
     html:
       '<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1e2422;max-width:640px">' +
-      `<p>The Front Desk Concierge checked ${meta.pagesReviewed ? 'all ' + meta.pagesReviewed + ' pages' : 'the pages'} on tucsonymca.org (${day}) and found ${total} item${total === 1 ? '' : 's'} on ${results.length} page${results.length === 1 ? '' : 's'} that may be out of date${newCount ? ` (${newCount} new since last week)` : ''}.</p>` +
+      (urgent.length ? '<div style="border:2px solid #c62828;border-radius:6px;padding:12px 14px;margin-bottom:18px"><h2 style="margin:0 0 8px;color:#c62828">⚠ IMMEDIATE ATTENTION — please fix on the website</h2><ul style="margin:0;padding-left:20px">' +
+        urgent.map((u) => `<li style="margin-bottom:6px"><strong>${escapeHtml(u.page)}</strong><br>${escapeHtml(u.problem)}</li>`).join('') +
+        `</ul><p style="margin:8px 0 0;color:#555;font-size:12px">Flagged by RJ Bergman — staff are getting the wrong information from the website.</p></div>` : '') +
+      (!total ? '' : `<p>The Front Desk Concierge checked ${meta.pagesReviewed ? 'all ' + meta.pagesReviewed + ' pages' : 'the pages'} on tucsonymca.org (${day}) and found ${total} item${total === 1 ? '' : 's'} on ${results.length} page${results.length === 1 ? '' : 's'} that may be out of date${newCount ? ` (${newCount} new since last week)` : ''}.</p>` +
       results.map((p) =>
         `<h3 style="margin:18px 0 6px"><a href="${escapeHtml(p.url)}">${escapeHtml(p.title)}</a></h3><ul>` +
         p.items.map((i) => `<li>${i.isNew ? '<strong>[NEW]</strong> ' : ''}"${escapeHtml(i.quote)}"<br><span style="color:#555">${escapeHtml(i.problem)}</span></li>`).join('') +
         '</ul>').join('') +
-      '<p style="color:#666;font-size:12px">Found by an automated review, so double-check before changing anything. This list is also in the concierge at /admin.</p></div>',
+      '<p style="color:#666;font-size:12px">Found by an automated review, so double-check before changing anything. This list is also in the concierge at /admin.</p>') + '</div>',
   };
 }
 
