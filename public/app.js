@@ -108,9 +108,17 @@
   function remembered(key){ try { return localStorage.getItem(key) || ''; } catch(e){ return ''; } }
   function remember(key, val){ try { localStorage.setItem(key, val); } catch(e){} }
 
+  // Who's signed in (branch + name from the sign-in page) — shown in the sidebar and used for Ask Support.
+  var me = {};
+  fetch('/api/me').then(function(r){ return r.json(); }).then(function(d){
+    me = d || {};
+    var el = document.getElementById('signed-in');
+    if(el && me.name){ el.textContent = 'Signed in: ' + me.name + ' · ' + me.branch; el.hidden = false; }
+  }).catch(function(){});
+
   function openSupport(question){
     els.sQuestion.value = question || '';
-    els.sName.value = remembered('fdc_name');
+    els.sName.value = me.name || remembered('fdc_name');
     els.sTopic.value = ''; els.sOther.value = ''; showOther();
     els.sStatus.textContent = ''; els.sStatus.className = 'dlg-status';
     els.sSend.disabled = false;

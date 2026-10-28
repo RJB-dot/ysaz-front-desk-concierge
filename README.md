@@ -21,7 +21,7 @@ You control both accounts and both bills — I never create accounts or spend on
 ## Try it locally first, for free (demo mode)
 
 If you don't set `ANTHROPIC_API_KEY`, the app runs in **demo mode**: every page works —
-the staff passcode gate, the chat UI, flyer attachments, the `/admin` editor — except the
+the staff sign-in page, the chat UI, flyer attachments, the `/admin` editor — except the
 chat endpoint returns a canned placeholder instead of a real Claude answer. This is a safe
 way to click through everything before spending anything.
 
@@ -31,7 +31,7 @@ install — just run it:
 ```
 cd front-desk-concierge
 cp .env.example .env
-# edit .env: set STAFF_PASSCODE, ADMIN_PASSWORD, and SESSION_SECRET
+# edit .env: set ADMIN_PASSWORD and SESSION_SECRET
 # (leave ANTHROPIC_API_KEY blank to stay in demo mode)
 npm start
 ```
@@ -76,7 +76,6 @@ is Phoenix; pick a different region code if you'd rather.)
 ```
 fly secrets set \
   ANTHROPIC_API_KEY=sk-ant-... \
-  STAFF_PASSCODE="whatever you want front desk staff to type" \
   ADMIN_PASSWORD="a stronger password for you and Anthony" \
   SESSION_SECRET="$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")"
 ```
@@ -106,22 +105,21 @@ every `git push` to `main` redeploys automatically.
 
 ## What staff will see
 
-- **Front desk / leadership staff**: visit the URL, type the shared passcode once (it's
-  remembered in their browser for 30 days), then ask questions in plain language. A "Staff
+- **Front desk / leadership staff**: visit the URL, choose their branch and type their name
+  (remembered in their browser for 30 days; "Switch user" in the sidebar signs out), then ask questions in plain language. A "Staff
   Directory" button and a link into `/admin` (view only, until they enter the admin password)
   sit in the sidebar.
 - **Managers (you + Anthony)**: visit `/admin`, enter the admin password, then add, edit, or
   delete knowledge base entries and attach flyer PDFs/images — the same editor as the old
   Claude-artifact version.
 
-## Changing the passcode or admin password later
+## Changing the admin password later
 
 ```
-fly secrets set STAFF_PASSCODE="new passcode"
 fly secrets set ADMIN_PASSWORD="new password"
 ```
 
-Each takes effect on the next request — no redeploy needed. Anyone already logged in stays
+It takes effect on the next request — no redeploy needed. Anyone already logged in stays
 logged in (cookies are valid 30 days) until they clear cookies or you rotate `SESSION_SECRET`,
 which invalidates every existing login.
 
@@ -132,8 +130,9 @@ which invalidates every existing login.
   means **only one Fly machine should ever run this app** (already set in `fly.toml` via
   `min_machines_running = 1` and no autoscaling). If you outgrow this later, swap the JSON
   file for a real database (e.g. Fly Postgres) — everything else stays the same.
-- Both the staff passcode and the admin password are single shared secrets, not per-person
-  logins — that was the simpler option you chose. If you'd rather have individual logins per
+- Staff sign in with just their branch and name — there's no passcode, so anyone with the link
+  can use the chat. Each question is logged with that branch and name (shown in the weekly
+  report and in /admin). The admin password is a single shared secret, not per-person logins. If you'd rather have individual logins per
   manager (so you know who changed what), that's a bigger change I can help with later.
 - The app was seeded with the same 31 knowledge base entries from the Claude-artifact
   version, including the Facility Use Agreement flyer.

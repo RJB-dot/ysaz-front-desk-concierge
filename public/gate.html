@@ -11,9 +11,12 @@
     <div class="gate-card">
       <div class="gate-mark">Y</div>
       <h1>Front Desk Concierge</h1>
-      <p>YMCA of Southern Arizona — enter the staff passcode to continue.</p>
+      <p>YMCA of Southern Arizona — choose your branch and enter your name to continue.</p>
       <form id="form">
-        <input id="passcode" type="password" inputmode="text" placeholder="Passcode" autocomplete="off" autofocus>
+        <select id="branch" required aria-label="Your branch">
+          <option value="">Select your branch…</option>
+        </select>
+        <input id="name" type="text" placeholder="Your name" autocomplete="name" maxlength="60" required>
         <button id="submit" type="submit">Continue</button>
       </form>
       <div class="gate-error" id="error"></div>
@@ -22,22 +25,38 @@
   </div>
   <script>
     var form = document.getElementById('form');
-    var input = document.getElementById('passcode');
+    var branch = document.getElementById('branch');
+    var nameInput = document.getElementById('name');
     var btn = document.getElementById('submit');
     var err = document.getElementById('error');
+    var last = {};
+    try { last = JSON.parse(localStorage.getItem('fdc_who') || '{}'); } catch(e){}
+    fetch('/api/branches').then(function(r){ return r.json(); }).then(function(list){
+      list.forEach(function(b){
+        var o = document.createElement('option');
+        o.value = b; o.textContent = b;
+        branch.appendChild(o);
+      });
+      if(last.branch) branch.value = last.branch;
+      if(last.name) nameInput.value = last.name;
+      (branch.value ? nameInput : branch).focus();
+    });
     form.addEventListener('submit', function(ev){
       ev.preventDefault();
-      var passcode = input.value;
-      if(!passcode) return;
+      var who = { branch: branch.value, name: nameInput.value.trim() };
+      if(!who.branch){ err.textContent = 'Please choose your branch.'; branch.focus(); return; }
+      if(who.name.length < 2){ err.textContent = 'Please enter your name.'; nameInput.focus(); return; }
       btn.disabled = true; err.textContent = '';
       fetch('/api/staff-login', {
         method: 'POST', headers: {'content-type':'application/json'},
-        body: JSON.stringify({ passcode: passcode })
+        body: JSON.stringify(who)
       }).then(function(r){
-        if(r.ok){ window.location.href = '/'; return; }
-        if(r.status === 429){ err.textContent = 'Too many attempts — try again later.'; }
-        else { err.textContent = "That passcode didn't work."; }
-        btn.disabled = false; input.value=''; input.focus();
+        if(r.ok){
+          try { localStorage.setItem('fdc_who', JSON.stringify(who)); localStorage.setItem('fdc_name', who.name); } catch(e){}
+          window.location.href = '/'; return;
+        }
+        err.textContent = r.status === 429 ? 'Too many attempts — try again later.' : 'Something went wrong — try again.';
+        btn.disabled = false;
       }).catch(function(){
         err.textContent = 'Something went wrong — try again.';
         btn.disabled = false;

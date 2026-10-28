@@ -1,5 +1,5 @@
 // Front Desk Concierge — standalone server (zero external dependencies; Node 18+ built-ins only)
-// Staff chat (gated by a shared passcode) + /admin knowledge base editor (gated by a shared admin password).
+// Staff chat (staff sign in with their branch and name) + /admin knowledge base editor (gated by a shared admin password).
 // Knowledge base + uploaded flyers are stored as JSON/files on disk (DATA_DIR), so they survive restarts
 // as long as DATA_DIR is a persistent volume (see fly.toml).
 
@@ -71,10 +71,9 @@ const SEED_FILE = path.join(__dirname, 'seed', 'kb.seed.json');
 const SEED_UPLOADS_DIR = path.join(__dirname, 'seed', 'uploads');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
-const STAFF_PASSCODE = process.env.STAFF_PASSCODE || '';
-// The staff chat is open to anyone with the link (no passcode). Set REQUIRE_STAFF_PASSCODE=true to bring
-// the passcode page back. /admin always needs ADMIN_PASSWORD.
-const REQUIRE_STAFF_PASSCODE = process.env.REQUIRE_STAFF_PASSCODE === 'true';
+// Staff sign in by picking their branch and typing their name (no passcode); it's remembered for 30 days
+// and logged with each question. /admin always needs ADMIN_PASSWORD.
+const BRANCHES = ['Lighthouse', 'Lohse Family', 'Northwest', 'Ott Family', 'Triangle Y Ranch Camp', 'Youth Development'];
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
@@ -87,7 +86,6 @@ const EMAIL_FROM = process.env.EMAIL_FROM || 'Front Desk Concierge <onboarding@r
 const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'support@tucsonymca.org';
 
 if (!SESSION_SECRET) console.warn('WARNING: SESSION_SECRET is not set. Login cookies will use an insecure fallback key. Set SESSION_SECRET before going live.');
-if (REQUIRE_STAFF_PASSCODE && !STAFF_PASSCODE) console.warn('WARNING: STAFF_PASSCODE is not set — the staff gate will reject everyone until it is.');
 if (!ADMIN_PASSWORD) console.warn('WARNING: ADMIN_PASSWORD is not set — /admin will reject everyone until it is.');
 if (!RESEND_API_KEY) console.warn('NOTE: RESEND_API_KEY is not set — staff questions will be saved to /admin but not emailed to ' + SUPPORT_EMAIL + '.');
 if (DEMO_MODE) console.warn('DEMO MODE: no ANTHROPIC_API_KEY set — chat answers will be canned placeholders, not real Claude responses.');
@@ -110,6 +108,22 @@ function verifyCookie(signed, expected) {
     return crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(actualSig));
   } catch {
     return false;
+  }
+}
+// Signed cookie carrying who's signed in: { branch, name }.
+function readStaffCookie(signed) {
+  if (!signed) return null;
+  const idx = signed.lastIndexOf('.');
+  if (idx === -1) return null;
+  const value = signed.slice(0, idx);
+  if (!value.startsWith('who:')) return null;
+  const expectedSig = sign(value).split('.')[1];
+  try {
+    if (!crypto.timingSafeEqual(Buffer.from(expectedSig), Buffer.from(signed.slice(idx + 1)))) return null;
+    const who = JSON.parse(Buffer.from(value.slice(4), 'base64url').toString('utf8'));
+    return who && BRANCHES.includes(who.branch) && who.name ? who : null;
+  } catch {
+    return null;
   }
 }
 function parseCookies(req) {
@@ -350,7 +364,8 @@ function sendFile(res, filePath, status) {
 }
 
 // ---------- auth ----------
-function isStaff(req) { if (!REQUIRE_STAFF_PASSCODE) return true; const c = parseCookies(req); return verifyCookie(c.fdc_staff, 'staff'); }
+function staffWho(req) { return readStaffCookie(parseCookies(req).fdc_staff); }
+function isStaff(req) { return !!staffWho(req); }
 function isAdmin(req) { const c = parseCookies(req); return verifyCookie(c.fdc_admin, 'admin'); }
 
 // ---------- chat helpers ----------
@@ -903,7 +918,7 @@ function loadQuestionLog() {
   if (!fs.existsSync(QUESTION_LOG_FILE)) return [];
   return JSON.parse(fs.readFileSync(QUESTION_LOG_FILE, 'utf8'));
 }
-// entry: { q, at, ok, unanswered, tools, inTok, outTok, loc } — loc is a one-way hash of the internet address,
+// entry: { q, at, ok, unanswered, tools, inTok, outTok, loc, branch, name } — loc is a one-way hash of the internet address,
 // only used to count how many different places (roughly, branches) use the tool.
 function logQuestion(entry) {
   const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
@@ -1004,6 +1019,8 @@ async function buildUsageReport() {
   const busiestHour = [...countBy(thisWeek, (q) => hourOf(q.at))].sort((a, b) => b[1] - a[1])[0];
   const hourLabel = (h) => new Date(Date.UTC(2026, 0, 1, h + 7)).toLocaleTimeString('en-US', { timeZone: 'America/Phoenix', hour: 'numeric' });
   const places = new Set(thisWeek.map((q) => q.loc).filter(Boolean)).size;
+  const byBranch = [...countBy(thisWeek.filter((q) => q.branch), (q) => q.branch)].sort((a, b) => b[1] - a[1]);
+  const askedBy = (q) => q.name ? ` — ${esc(q.name)}${q.branch ? ', ' + esc(q.branch) : ''}` : '';
   const unanswered = thisWeek.filter((q) => q.ok !== false && q.unanswered);
   const failed = thisWeek.filter((q) => q.ok === false).length;
   const answeredSince = loadUnansweredDone();
@@ -1030,12 +1047,12 @@ async function buildUsageReport() {
     `<h2 style="margin:0 0 4px">Front Desk Concierge — weekly usage</h2>` +
     `<p style="margin:0 0 16px;color:#555">${fmtDay(now - week)} – ${fmtDay(now)}</p>` +
     (unansweredOpen.length ? '<h3 style="margin:0 0 6px">Questions it couldn\'t answer</h3><p style="margin:0 0 6px;color:#555">Click one to add the missing information as a saved answer.</p><ul style="margin:0;padding-left:20px">' +
-      unansweredOpen.slice(-30).reverse().map((q) => `<li><a href="${esc(answerLink(q.q))}">${esc(q.q)}</a> <span style="color:#888">(${fmtDay(q.at)})</span></li>`).join('') + '</ul><div style="height:16px"></div>' : '') +
+      unansweredOpen.slice(-30).reverse().map((q) => `<li><a href="${esc(answerLink(q.q))}">${esc(q.q)}</a> <span style="color:#888">(${fmtDay(q.at)}${askedBy(q)})</span></li>`).join('') + '</ul><div style="height:16px"></div>' : '') +
     '<table style="border-collapse:collapse;margin-bottom:16px">' +
     row('Questions asked', thisWeek.length + (change === null ? '' : ` (${change >= 0 ? '+' : ''}${change}% vs. the week before)`)) +
     row('Couldn\'t answer', unanswered.length + (thisWeek.length ? ` (${Math.round((unanswered.length / thisWeek.length) * 100)}%)` : '')) +
     (failed ? row('Errors', failed) : '') +
-    row('Different locations using it', places) +
+    (byBranch.length ? row('Questions by branch', byBranch.map(([b, n]) => `${esc(b)} ${n}`).join(' · ')) : row('Different locations using it', places)) +
     row('Busiest time', busiestHour ? `around ${hourLabel(busiestHour[0])} (${busiestHour[1]} questions)` : '—') +
     row('Live Daxko program searches', programSearches) +
     row('Website searches', siteSearches) +
@@ -1062,7 +1079,7 @@ async function buildUsageReport() {
         `<h2 style="margin:0 0 4px">Questions the Front Desk Concierge couldn't answer</h2>` +
         `<p style="margin:0 0 16px;color:#555">${fmtDay(now - week)} – ${fmtDay(now)} · front desk staff asked these and the concierge didn't have the information.</p>` +
         '<ul style="margin:0;padding-left:20px">' +
-        unansweredOpen.slice(-30).reverse().map((q) => `<li style="margin-bottom:4px"><a href="${esc(answerLink(q.q))}">${esc(q.q)}</a> <span style="color:#888">(${fmtDay(q.at)})</span></li>`).join('') +
+        unansweredOpen.slice(-30).reverse().map((q) => `<li style="margin-bottom:4px"><a href="${esc(answerLink(q.q))}">${esc(q.q)}</a> <span style="color:#888">(${fmtDay(q.at)}${askedBy(q)})</span></li>`).join('') +
         '</ul>' +
         '<p style="margin:16px 0 0">If you know an answer, click the question to add it in Admin (admin password needed), or just reply to this email with the information.</p>' +
         `<p style="margin:20px 0 0;color:#888;font-size:12px">From the Front Desk Concierge (${esc(PUBLIC_URL)}).</p></div>`,
@@ -1088,8 +1105,10 @@ function unansweredQuestions() {
     if (e.ok === false || !e.unanswered) continue;
     const key = normQuestion(e.q);
     if (!key || done.has(key)) continue;
-    const g = groups.get(key) || { question: e.q, count: 0, lastAt: 0 };
+    const g = groups.get(key) || { question: e.q, count: 0, lastAt: 0, askedBy: [] };
     g.count++;
+    const by = e.name ? e.name + (e.branch ? ' (' + e.branch + ')' : '') : e.branch;
+    if (by && !g.askedBy.includes(by)) g.askedBy.push(by);
     if (e.at >= g.lastAt) { g.lastAt = e.at; g.question = e.q; }
     groups.set(key, g);
   }
@@ -1283,21 +1302,22 @@ route('GET', '/admin', async (req, res) => {
   sendFile(res, path.join(PUBLIC_DIR, isAdmin(req) ? 'admin.html' : 'admin-login.html'));
 });
 
+route('GET', '/api/branches', async (req, res) => sendJson(res, 200, BRANCHES));
 route('POST', '/api/staff-login', async (req, res, params, ip) => {
   if (rateLimited(ip)) return sendJson(res, 429, { error: 'rate_limited' });
   const body = await readJsonBody(req, 4096).catch(() => ({}));
-  if (STAFF_PASSCODE && body.passcode === STAFF_PASSCODE) {
-    setAuthCookie(res, 'fdc_staff', 'staff');
-    return sendJson(res, 200, { ok: true });
-  }
-  return sendJson(res, 401, { error: 'wrong_passcode' });
+  const branch = String(body.branch || '');
+  const name = String(body.name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  if (!BRANCHES.includes(branch) || name.length < 2) return sendJson(res, 400, { error: 'missing_fields' });
+  setAuthCookie(res, 'fdc_staff', 'who:' + Buffer.from(JSON.stringify({ branch, name })).toString('base64url'));
+  sendJson(res, 200, { ok: true });
 });
+route('GET', '/api/me', async (req, res) => sendJson(res, 200, staffWho(req) || {}));
 route('POST', '/api/admin-login', async (req, res, params, ip) => {
   if (rateLimited(ip)) return sendJson(res, 429, { error: 'rate_limited' });
   const body = await readJsonBody(req, 4096).catch(() => ({}));
   if (ADMIN_PASSWORD && body.password === ADMIN_PASSWORD) {
     setAuthCookie(res, 'fdc_admin', 'admin');
-    setAuthCookie(res, 'fdc_staff', 'staff');
     return sendJson(res, 200, { ok: true });
   }
   return sendJson(res, 401, { error: 'wrong_password' });
@@ -1354,15 +1374,16 @@ route('POST', '/api/chat', async (req, res, params, ip) => {
   {
     const stats = {};
     const loc = crypto.createHmac('sha256', secret).update(ip).digest('hex').slice(0, 12);
+    const who = staffWho(req) || {};
     try {
       const answer = await callAnthropic(instructions, messages, stats);
       const seen = new Set(flyers.map((f) => f.url));
       for (const f of relatedAnnouncementFlyers(body.question, answer)) if (!seen.has(f.url)) { seen.add(f.url); flyers.push(f); }
       sendJson(res, 200, { answer, flyers });
-      try { logQuestion({ q: body.question.trim(), ok: true, unanswered: UNANSWERED_RE.test(answer), tools: stats.tools, inTok: stats.inTok, outTok: stats.outTok, loc }); } catch (e) { console.error('Could not log question', e.message); }
+      try { logQuestion({ q: body.question.trim(), ok: true, unanswered: UNANSWERED_RE.test(answer), tools: stats.tools, inTok: stats.inTok, outTok: stats.outTok, loc, branch: who.branch, name: who.name }); } catch (e) { console.error('Could not log question', e.message); }
     } catch {
       sendJson(res, 502, { error: 'upstream_error' });
-      try { logQuestion({ q: body.question.trim(), ok: false, tools: stats.tools || [], inTok: stats.inTok || 0, outTok: stats.outTok || 0, loc }); } catch (e) { console.error('Could not log question', e.message); }
+      try { logQuestion({ q: body.question.trim(), ok: false, tools: stats.tools || [], inTok: stats.inTok || 0, outTok: stats.outTok || 0, loc, branch: who.branch, name: who.name }); } catch (e) { console.error('Could not log question', e.message); }
     }
   }
 });
@@ -1375,10 +1396,11 @@ route('POST', '/api/questions', async (req, res, params, ip) => {
   const body = await readJsonBody(req, 20000).catch(() => null);
   const clip = (v, n) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
   const question = clip(body && body.question, 2000);
-  const name = clip(body && body.name, 100);
+  const who = staffWho(req) || {};
+  const name = clip(body && body.name, 100) || who.name || '';
   if (!question || !name || !clip(body.topic, 120)) return sendJson(res, 400, { error: 'missing_fields' });
   const entry = {
-    id: newId(), question, name,
+    id: newId(), question, name, branch: who.branch || '',
     topic: clip(body.topic, 120),
     createdAt: Date.now(), handled: false, emailed: false,
   };
@@ -1387,7 +1409,7 @@ route('POST', '/api/questions', async (req, res, params, ip) => {
     const row = (label, val) => val ? `<p><strong>${label}:</strong><br>${escapeHtml(val).replace(/\n/g, '<br>')}</p>` : '';
     const html =
       "<p>A front desk staff member asked a question the Front Desk Concierge couldn't answer.</p>" +
-      row('Topic', entry.topic) + row('Question', entry.question) + row('From', entry.name) +
+      row('Topic', entry.topic) + row('Question', entry.question) + row('From', entry.name + (entry.branch ? ' (' + entry.branch + ')' : '')) +
       '<p style="color:#666;font-size:12px">Once it&#39;s answered, add it to the knowledge base at /admin so the concierge can answer it next time.</p>';
     try {
       await sendEmailViaResend(SUPPORT_EMAIL, 'Front desk question (' + entry.topic + '): ' + entry.question.slice(0, 80), html);

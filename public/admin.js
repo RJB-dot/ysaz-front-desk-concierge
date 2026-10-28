@@ -241,7 +241,7 @@
       var item = document.createElement('div');
       item.className = 'kb-item q-item' + (q.handled ? ' handled' : '');
       var meta = (q.topic ? '<span class="q-topic">' + escapeHtml(q.topic) + '</span> · ' : '') +
-        escapeHtml(q.name) + ' · ' + fmtDate(q.createdAt) +
+        escapeHtml(q.name) + (q.branch ? ' (' + escapeHtml(q.branch) + ')' : '') + ' · ' + fmtDate(q.createdAt) +
         (q.emailed ? ' · emailed to Support' : ' · <span class="q-warn">not emailed</span>');
       item.innerHTML =
         '<div class="row"><div class="ttl">'+escapeHtml(q.question)+'</div>' +
@@ -295,7 +295,7 @@
     item._question = u.question;
     item.innerHTML =
       '<button type="button" class="un-q">' + escapeHtml(u.question) + '</button>' +
-      '<div class="q-meta">' + (u.lastAt ? (u.count > 1 ? 'Asked ' + u.count + ' times · last ' : 'Asked ') + fmtDate(u.lastAt) : 'From the weekly report') + '</div>';
+      '<div class="q-meta">' + (u.lastAt ? (u.count > 1 ? 'Asked ' + u.count + ' times · last ' : 'Asked ') + fmtDate(u.lastAt) : 'From the weekly report') + (u.askedBy && u.askedBy.length ? ' · by ' + escapeHtml(u.askedBy.join(', ')) : '') + '</div>';
     item.querySelector('.un-q').addEventListener('click', function(){
       if(item.querySelector('.un-box')) closeAnswerBox(item); else openAnswerBox(item);
     });
