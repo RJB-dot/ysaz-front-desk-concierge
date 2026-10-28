@@ -214,8 +214,18 @@ function dedupeAnnouncements() {
   store.entries = store.entries.filter((a) => { const k = announcementKey(a); if (seen.has(k)) return false; seen.add(k); return true; });
   if (store.entries.length !== before) { saveAnnouncements(store); console.log(`Removed ${before - store.entries.length} duplicate announcement(s)`); }
 }
+// Each answer can have several files (entry.attachments); answers saved before that had one (entry.attachment).
 function loadKb() {
-  return JSON.parse(fs.readFileSync(KB_FILE, 'utf8'));
+  const kb = JSON.parse(fs.readFileSync(KB_FILE, 'utf8'));
+  for (const e of kb.entries) {
+    if (!Array.isArray(e.attachments)) e.attachments = e.attachment ? [e.attachment] : [];
+    delete e.attachment;
+  }
+  return kb;
+}
+function removeUpload(a) {
+  const p = path.join(UPLOADS_DIR, path.basename(a.path));
+  if (fs.existsSync(p)) fs.unlinkSync(p);
 }
 function saveKb(kb) {
   fs.writeFileSync(KB_FILE, JSON.stringify(kb, null, 2));
@@ -248,15 +258,15 @@ const IMPORTS_APPLIED_FILE = path.join(DATA_DIR, 'imports-applied.json');
         added++;
         continue;
       }
-      let attachment = null;
+      const attachments = [];
       if (e.attachment) {
         const src = path.join(IMPORTS_DIR, 'files', e.attachment);
         const storedName = `${newId()}-${e.attachment.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
         fs.copyFileSync(src, path.join(UPLOADS_DIR, storedName));
         const ext = path.extname(e.attachment).toLowerCase();
-        attachment = { filename: e.attachmentTitle ? e.attachmentTitle + ext : e.attachment, path: storedName, contentType: { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }[ext] || 'application/octet-stream', validUntil: e.attachmentValidUntil || null };
+        attachments.push({ filename: e.attachmentTitle ? e.attachmentTitle + ext : e.attachment, path: storedName, contentType: { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }[ext] || 'application/octet-stream', validUntil: e.attachmentValidUntil || null });
       }
-      kb.entries.push({ id: newId(), title: String(e.title).trim(), content: String(e.content).trim(), attachment, validUntil: e.validUntil || null, updatedAt: Date.now() });
+      kb.entries.push({ id: newId(), title: String(e.title).trim(), content: String(e.content).trim(), attachments, validUntil: e.validUntil || null, updatedAt: Date.now() });
       applied.add(e.id);
       added++;
     }
@@ -377,13 +387,16 @@ function stillValid(validUntil) {
 function currentKbEntries(kb) {
   return kb.entries.filter((e) => stillValid(e.validUntil));
 }
+function currentFlyers(e) {
+  return (e.attachments || []).filter((a) => stillValid(a.validUntil));
+}
 function hasCurrentFlyer(e) {
-  return !!e.attachment && stillValid(e.attachment.validUntil);
+  return currentFlyers(e).length > 0;
 }
 function kbText(kb) {
   const entries = currentKbEntries(kb);
   if (!entries.length) return '(no entries saved yet)';
-  return entries.map((e) => `### ${e.title}${hasCurrentFlyer(e) ? ' (flyer attached)' : ''}${e.validUntil ? ` (valid through ${e.validUntil})` : ''}\n${e.content}`).join('\n\n');
+  return entries.map((e) => `### ${e.title}${hasCurrentFlyer(e) ? (currentFlyers(e).length > 1 ? ` (${currentFlyers(e).length} flyers attached)` : ' (flyer attached)') : ''}${e.validUntil ? ` (valid through ${e.validUntil})` : ''}\n${e.content}`).join('\n\n');
 }
 // Words in nearly every title (e.g. "Branch Info — Lohse … (hours, phone, amenities, membership flyer)")
 // don't identify a flyer, so "Lohse hours" shouldn't pull up every branch's flyer.
@@ -1338,7 +1351,7 @@ route('POST', '/api/chat', async (req, res, params, ip) => {
     return sendJson(res, 400, { error: 'missing_question' });
   }
   const kb = loadKb();
-  const flyers = findRelatedFlyers(kb, body.question).map((e) => ({ id: e.id, title: e.title, filename: e.attachment.filename, url: `/uploads/${e.attachment.path}` }));
+  const flyers = findRelatedFlyers(kb, body.question).flatMap((e) => currentFlyers(e).map((a) => ({ id: e.id, title: e.title, filename: a.filename, url: `/uploads/${a.path}` })));
 
   if (DEMO_MODE) {
     return sendJson(res, 200, {
@@ -1619,7 +1632,7 @@ route('POST', '/api/admin/kb', async (req, res) => {
   const body = await readJsonBody(req, 200000).catch(() => null);
   if (!body || !body.title || !body.content) return sendJson(res, 400, { error: 'missing_fields' });
   const kb = loadKb();
-  const entry = { id: newId(), title: String(body.title).trim(), content: String(body.content).trim(), attachment: null, updatedAt: Date.now() };
+  const entry = { id: newId(), title: String(body.title).trim(), content: String(body.content).trim(), attachments: [], updatedAt: Date.now() };
   kb.entries.push(entry);
   saveKb(kb);
   sendJson(res, 200, entry);
@@ -1644,7 +1657,7 @@ route('DELETE', '/api/admin/kb/:id', async (req, res, params) => {
   if (idx === -1) return sendJson(res, 404, { error: 'not_found' });
   const [removed] = kb.entries.splice(idx, 1);
   saveKb(kb);
-  if (removed.attachment) { const p = path.join(UPLOADS_DIR, removed.attachment.path); fs.existsSync(p) && fs.unlinkSync(p); }
+  removed.attachments.forEach(removeUpload);
   sendJson(res, 200, { ok: true });
 });
 
@@ -1660,27 +1673,26 @@ route('POST', '/api/admin/kb/:id/attachment', async (req, res, params) => {
   const file = files.file;
   if (!file) return sendJson(res, 400, { error: 'missing_file' });
   if (!ALLOWED_UPLOAD_TYPES.includes(file.contentType)) return sendJson(res, 400, { error: 'unsupported_type' });
-  if (entry.attachment) { const p = path.join(UPLOADS_DIR, entry.attachment.path); fs.existsSync(p) && fs.unlinkSync(p); }
   const safeName = file.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
   const storedName = `${newId()}-${safeName}`;
   fs.writeFileSync(path.join(UPLOADS_DIR, storedName), file.data);
-  entry.attachment = { filename: file.filename, path: storedName, contentType: file.contentType };
+  entry.attachments.push({ filename: file.filename, path: storedName, contentType: file.contentType }); // adds — doesn't replace
   entry.updatedAt = Date.now();
   saveKb(kb);
   sendJson(res, 200, entry);
 });
-route('DELETE', '/api/admin/kb/:id/attachment', async (req, res, params) => {
+// Removes one file (by its stored name) from an answer.
+route('DELETE', '/api/admin/kb/:id/attachment/:file', async (req, res, params) => {
   if (!isAdmin(req)) return sendJson(res, 401, { error: 'not_authenticated' });
   const kb = loadKb();
   const entry = kb.entries.find((e) => e.id === params.id);
   if (!entry) return sendJson(res, 404, { error: 'not_found' });
-  if (entry.attachment) {
-    const p = path.join(UPLOADS_DIR, entry.attachment.path);
-    fs.existsSync(p) && fs.unlinkSync(p);
-    entry.attachment = null;
-    entry.updatedAt = Date.now();
-    saveKb(kb);
-  }
+  const i = entry.attachments.findIndex((a) => a.path === params.file);
+  if (i === -1) return sendJson(res, 404, { error: 'not_found' });
+  removeUpload(entry.attachments[i]);
+  entry.attachments.splice(i, 1);
+  entry.updatedAt = Date.now();
+  saveKb(kb);
   sendJson(res, 200, entry);
 });
 

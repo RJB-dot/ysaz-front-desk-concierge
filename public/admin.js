@@ -4,7 +4,6 @@
     title: document.getElementById('f-title'),
     content: document.getElementById('f-content'),
     file: document.getElementById('f-file'),
-    fileCurrent: document.getElementById('file-current'),
     save: document.getElementById('f-save'),
     cancel: document.getElementById('f-cancel'),
     status: document.getElementById('f-status'),
@@ -23,8 +22,6 @@
     copyStatus: document.getElementById('copy-status'),
   };
   var editingId = null;
-  var editingEntry = null;
-  var removeAttachmentFlag = false;
 
   function escapeHtml(s){
     return String(s).replace(/[&<>"']/g, function(c){
@@ -45,30 +42,32 @@
     });
   }
 
+  // Uploads files to an answer one at a time (each adds to the answer's files). Resolves to how many failed.
+  function uploadFiles(entryId, files){
+    var failed = 0;
+    return Array.prototype.reduce.call(files || [], function(p, file){
+      return p.then(function(){
+        var fd = new FormData(); fd.append('file', file);
+        return fetch('/api/admin/kb/'+entryId+'/attachment', { method:'POST', body: fd })
+          .then(function(r){ if(!r.ok) failed++; }).catch(function(){ failed++; });
+      });
+    }, Promise.resolve()).then(function(){ return failed; });
+  }
+  function fileLink(a){
+    return '<a href="/uploads/'+encodeURIComponent(a.path)+'" target="_blank" rel="noopener">'+escapeHtml(a.filename || 'File')+'</a>';
+  }
+
   els.logout.addEventListener('click', function(ev){
     ev.preventDefault();
     fetch('/api/logout', { method: 'POST' }).then(function(){ window.location.href = '/'; });
   });
 
-  function renderFileCurrent(){
-    if(editingEntry && editingEntry.attachment && !removeAttachmentFlag){
-      els.fileCurrent.innerHTML =
-        '📎 <span>'+escapeHtml(editingEntry.attachment.filename || 'Attached flyer')+'</span> ' +
-        '<button type="button" class="btn danger" id="remove-attachment" style="margin-left:8px;">Remove</button>';
-      var btn = document.getElementById('remove-attachment');
-      btn.addEventListener('click', function(){ removeAttachmentFlag = true; renderFileCurrent(); });
-    } else {
-      els.fileCurrent.innerHTML = '';
-    }
-  }
-
   function resetForm(){
-    editingId = null; editingEntry = null; removeAttachmentFlag = false;
+    editingId = null;
     els.title.value = ''; els.content.value = ''; els.file.value = '';
     els.formTitle.textContent = 'Add a new answer';
     els.cancel.hidden = true;
     els.status.textContent = ''; els.status.className = 'status-msg';
-    renderFileCurrent();
   }
   els.cancel.addEventListener('click', resetForm);
 
@@ -97,11 +96,10 @@
       var today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Phoenix' });
       var expiryHtml = '';
       if(e.validUntil) expiryHtml += '<div class="q-meta'+(e.validUntil < today ? ' q-warn' : '')+'">'+(e.validUntil < today ? 'Expired ' : 'Used through ')+escapeHtml(e.validUntil)+(e.validUntil < today ? ' — the concierge no longer uses this answer' : '')+'</div>';
-      if(e.attachment && e.attachment.validUntil) expiryHtml += '<div class="q-meta'+(e.attachment.validUntil < today ? ' q-warn' : '')+'">Flyer '+(e.attachment.validUntil < today ? 'hidden since ' : 'shown through ')+escapeHtml(e.attachment.validUntil)+'</div>';
-      if(e.attachment){
-        flyerHtml = '<div class="file-row">📎 '+escapeHtml(e.attachment.filename || 'Flyer')+
-          ' — <a href="/uploads/'+e.attachment.path+'" target="_blank" rel="noopener">view</a></div>';
-      }
+      (e.attachments || []).forEach(function(a){
+        flyerHtml += '<div class="file-row">📎 ' + fileLink(a) +
+          (a.validUntil ? ' <span class="q-meta'+(a.validUntil < today ? ' q-warn' : '')+'">· '+(a.validUntil < today ? 'hidden since ' : 'shown through ')+escapeHtml(a.validUntil)+'</span>' : '') + '</div>';
+      });
       item.innerHTML =
         '<div class="row"><div class="ttl">'+escapeHtml(e.title)+'</div>' +
         '<div class="kb-actions"><button data-act="edit">Edit</button><button data-act="del">Delete</button></div></div>' +
@@ -120,13 +118,13 @@
 
   // Edit an answer right inside its own box (title, answer, flyer) — the page doesn't move.
   function editInPlace(item, e){
-    var removeFlyer = false;
+    var removePaths = [];
     item.innerHTML =
       '<label>Title</label><input type="text" class="ed-title">' +
       '<label>Answer</label><textarea class="ed-content"></textarea>' +
       '<div class="file-row ed-flyer"></div>' +
-      '<label>' + (e.attachment ? 'Replace the flyer' : 'Attach a flyer') + ' (optional — PDF or image)</label>' +
-      '<input type="file" class="ed-file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp">' +
+      '<label>Add files (optional — PDFs or images; you can pick several)</label>' +
+      '<input type="file" class="ed-file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp" multiple>' +
       '<div class="form-actions"><button type="button" class="btn primary ed-save">Save</button><button type="button" class="btn ed-cancel">Cancel</button></div>' +
       '<div class="status-msg ed-status"></div>';
     item.classList.add('editing');
@@ -136,13 +134,19 @@
     content.style.height = Math.min(Math.max(content.scrollHeight + 4, 140), 600) + 'px';
     function renderFlyer(){
       var slot = item.querySelector('.ed-flyer');
-      if(e.attachment && !removeFlyer){
-        slot.innerHTML = '📎 <a href="/uploads/'+e.attachment.path+'" target="_blank" rel="noopener">'+escapeHtml(e.attachment.filename || 'Flyer')+'</a> ' +
-          '<button type="button" class="btn danger ed-remove" style="margin-left:8px;">Remove</button>';
-        slot.querySelector('.ed-remove').addEventListener('click', function(){ removeFlyer = true; renderFlyer(); });
-      } else {
-        slot.innerHTML = removeFlyer ? '<span class="q-meta">Flyer will be removed when you save.</span>' : '';
-      }
+      slot.innerHTML = '';
+      (e.attachments || []).forEach(function(a){
+        var row = document.createElement('div');
+        row.className = 'ed-file-row';
+        if(removePaths.indexOf(a.path) !== -1){
+          row.innerHTML = '<span class="q-meta">' + escapeHtml(a.filename || 'File') + ' will be removed when you save.</span> <button type="button" class="btn">Undo</button>';
+          row.querySelector('button').addEventListener('click', function(){ removePaths.splice(removePaths.indexOf(a.path), 1); renderFlyer(); });
+        } else {
+          row.innerHTML = '📎 ' + fileLink(a) + ' <button type="button" class="btn danger">Remove</button>';
+          row.querySelector('button').addEventListener('click', function(){ removePaths.push(a.path); renderFlyer(); });
+        }
+        slot.appendChild(row);
+      });
     }
     renderFlyer();
     content.focus({ preventScroll: true });
@@ -158,13 +162,15 @@
       fetch('/api/admin/kb/'+e.id, {
         method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify({ title: title, content: text })
       }).then(function(r){ if(!r.ok) throw new Error(); }).then(function(){
-        var file = item.querySelector('.ed-file').files[0];
-        if(file){
-          var fd = new FormData(); fd.append('file', file);
-          return fetch('/api/admin/kb/'+e.id+'/attachment', { method:'POST', body: fd });
-        }
-        if(removeFlyer) return fetch('/api/admin/kb/'+e.id+'/attachment', { method:'DELETE' });
-      }).then(loadList).catch(function(){ btn.disabled = false; say('Something went wrong saving that.', false); });
+        return removePaths.reduce(function(p, path){
+          return p.then(function(){ return fetch('/api/admin/kb/'+e.id+'/attachment/'+encodeURIComponent(path), { method:'DELETE' }); });
+        }, Promise.resolve());
+      }).then(function(){
+        return uploadFiles(e.id, item.querySelector('.ed-file').files);
+      }).then(function(failed){
+        if(failed){ btn.disabled = false; say('Saved, but ' + failed + ' file' + (failed === 1 ? '' : 's') + ' didn\'t upload (PDF or image, under 20 MB).', false); return; }
+        loadList();
+      }).catch(function(){ btn.disabled = false; say('Something went wrong saving that.', false); });
     });
   }
 
@@ -187,16 +193,10 @@
         loadList();
         resetForm();
       };
-      var file = els.file.files[0];
-      if(file){
-        var fd = new FormData(); fd.append('file', file);
-        fetch('/api/admin/kb/'+entry.id+'/attachment', { method:'POST', body: fd })
-          .then(afterSave).catch(function(){ setStatus('Saved, but the flyer upload failed.', false); loadList(); resetForm(); });
-      } else if(removeAttachmentFlag && entry.id){
-        fetch('/api/admin/kb/'+entry.id+'/attachment', { method:'DELETE' }).then(afterSave);
-      } else {
+      uploadFiles(entry.id, els.file.files).then(function(failed){
+        if(failed){ setStatus('Saved, but ' + failed + ' file' + (failed === 1 ? '' : 's') + ' didn\'t upload (PDF or image, under 20 MB).', false); loadList(); resetForm(); return; }
         afterSave();
-      }
+      });
     }).catch(function(){
       setStatus('Something went wrong saving that.', false);
     }).finally(function(){ els.save.disabled = false; });
@@ -327,7 +327,7 @@
       });
       html +=
         '<label>' + ((d.needed || []).length ? 'Anything else staff should know (optional)' : 'The answer') + '</label><textarea class="un-extra"></textarea>' +
-        '<label>Attach a flyer (optional — PDF or image)</label><input type="file" class="un-file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp">' +
+        '<label>Attach files (optional — PDFs or images; you can pick several)</label><input type="file" class="un-file" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp" multiple>' +
         '<div class="form-actions">' +
           '<button type="button" class="btn primary un-save">Save as answer</button>' +
           '<button type="button" class="btn un-dismiss">Doesn\'t need an answer</button>' +
@@ -362,10 +362,7 @@
         fetch('/api/admin/kb', {
           method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ title: title, content: content })
         }).then(function(r){ if(!r.ok) throw new Error(); return r.json(); }).then(function(entry){
-          var file = box.querySelector('.un-file').files[0];
-          if(!file) return entry;
-          var fd = new FormData(); fd.append('file', file);
-          return fetch('/api/admin/kb/'+entry.id+'/attachment', { method:'POST', body: fd }).then(function(){ return entry; });
+          return uploadFiles(entry.id, box.querySelector('.un-file').files).then(function(){ return entry; });
         }).then(markDone).then(function(){
           loadList();
           loadUnanswered();
