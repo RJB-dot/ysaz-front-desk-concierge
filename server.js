@@ -249,15 +249,6 @@ const IMPORTS_APPLIED_FILE = path.join(DATA_DIR, 'imports-applied.json');
   for (const file of fs.readdirSync(IMPORTS_DIR).filter((f) => f.endsWith('.json')).sort()) {
     for (const e of JSON.parse(fs.readFileSync(path.join(IMPORTS_DIR, file), 'utf8')).entries || []) {
       if (!e.id || applied.has(e.id)) continue;
-      // { id, update: "<exact title>", content } corrects an answer that's already live (once), keeping its flyer.
-      if (e.update) {
-        const target = kb.entries.find((k) => k.title === e.update);
-        if (target) { target.content = String(e.content).trim(); target.updatedAt = Date.now(); }
-        else console.warn(`Import ${e.id}: no answer titled "${e.update}" to update`);
-        applied.add(e.id);
-        added++;
-        continue;
-      }
       const attachments = [];
       if (e.attachment) {
         const src = path.join(IMPORTS_DIR, 'files', e.attachment);
@@ -265,6 +256,24 @@ const IMPORTS_APPLIED_FILE = path.join(DATA_DIR, 'imports-applied.json');
         fs.copyFileSync(src, path.join(UPLOADS_DIR, storedName));
         const ext = path.extname(e.attachment).toLowerCase();
         attachments.push({ filename: e.attachmentTitle ? e.attachmentTitle + ext : e.attachment, path: storedName, contentType: { '.pdf': 'application/pdf', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }[ext] || 'application/octet-stream', validUntil: e.attachmentValidUntil || null });
+      }
+      // { id, update: "<exact title>", content } corrects an answer that's already live (once), keeping its files —
+      // or, with replaceAttachments: true, swapping them for this import's attachment (e.g. a new flyer).
+      if (e.update) {
+        const target = kb.entries.find((k) => k.title === e.update);
+        if (target) {
+          if (e.title) target.title = String(e.title).trim();
+          target.content = String(e.content).trim();
+          if (e.replaceAttachments) { target.attachments.forEach(removeUpload); target.attachments = []; }
+          target.attachments.push(...attachments);
+          target.updatedAt = Date.now();
+        } else {
+          console.warn(`Import ${e.id}: no answer titled "${e.update}" to update`);
+          attachments.forEach(removeUpload);
+        }
+        applied.add(e.id);
+        added++;
+        continue;
       }
       kb.entries.push({ id: newId(), title: String(e.title).trim(), content: String(e.content).trim(), attachments, validUntil: e.validUntil || null, updatedAt: Date.now() });
       applied.add(e.id);
@@ -400,7 +409,7 @@ function kbText(kb) {
 }
 // Words in nearly every title (e.g. "Branch Info — Lohse … (hours, phone, amenities, membership flyer)")
 // don't identify a flyer, so "Lohse hours" shouldn't pull up every branch's flyer.
-const FLYER_MATCH_IGNORE = new Set('hours phone amenities membership memberships flyer flyers branch info ymca what when where does have with about'.split(' '));
+const FLYER_MATCH_IGNORE = new Set('hours phone amenities membership memberships flyer flyers walkaway walkaways branch info ymca what when where does have with about'.split(' '));
 function findRelatedFlyers(kb, question) {
   const q = question.toLowerCase();
   const words = q.split(/\W+/).filter((w) => w.length > 3 && !FLYER_MATCH_IGNORE.has(w));
